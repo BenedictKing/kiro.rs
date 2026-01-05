@@ -222,29 +222,44 @@ fn extract_tool_result_content(content: &Option<serde_json::Value>) -> String {
 }
 
 /// 转换工具定义
-fn convert_tools(tools: &Option<Vec<super::types::Tool>>) -> Vec<Tool> {
+fn convert_tools(tools: &Option<Vec<serde_json::Value>>) -> Vec<Tool> {
     let Some(tools) = tools else {
         return Vec::new();
     };
 
     tools
         .iter()
-        .filter(|t| !is_unsupported_tool(&t.name))
-        .map(|t| {
-            let description = t.description.clone().unwrap_or_default();
+        .filter_map(|t| {
+            // 获取工具名称，如果没有 name 字段则跳过
+            let name = t.get("name")?.as_str()?;
+
+            // 跳过不支持的工具
+            if is_unsupported_tool(name) {
+                return None;
+            }
+
+            // 获取 input_schema，如果没有则跳过（WebSearchTool 等特殊工具没有 input_schema）
+            let input_schema = t.get("input_schema")?;
+
+            // 获取描述（可选）
+            let description = t.get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or_default()
+                .to_string();
+
             // 限制描述长度为 10000 字符（安全截断 UTF-8，单次遍历）
             let description = match description.char_indices().nth(10000) {
                 Some((idx, _)) => description[..idx].to_string(),
                 None => description,
             };
 
-            Tool {
+            Some(Tool {
                 tool_specification: ToolSpecification {
-                    name: t.name.clone(),
+                    name: name.to_string(),
                     description,
-                    input_schema: InputSchema::from_json(serde_json::json!(t.input_schema)),
+                    input_schema: InputSchema::from_json(input_schema.clone()),
                 },
-            }
+            })
         })
         .collect()
 }

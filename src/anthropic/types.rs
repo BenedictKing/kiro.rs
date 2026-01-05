@@ -93,7 +93,8 @@ pub struct MessagesRequest {
     #[serde(default)]
     pub stream: bool,
     pub system: Option<Vec<SystemMessage>>,
-    pub tools: Option<Vec<Tool>>,
+    /// tools 可以是普通 Tool 或 WebSearchTool 等多种格式，使用 Value 灵活处理
+    pub tools: Option<Vec<serde_json::Value>>,
     pub tool_choice: Option<serde_json::Value>,
     pub thinking: Option<Thinking>,
 }
@@ -175,7 +176,7 @@ pub struct CountTokensRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<Vec<SystemMessage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<Tool>>,
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 /// Token 计数响应

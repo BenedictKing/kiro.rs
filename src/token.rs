@@ -8,7 +8,7 @@
 //! - 4 个字符单位 = 1 token（四舍五入）
 
 use std::sync::OnceLock;
-use crate::anthropic::types::{CountTokensRequest, CountTokensResponse, Message, SystemMessage, Tool};
+use crate::anthropic::types::{CountTokensRequest, CountTokensResponse, Message, SystemMessage};
 use crate::http_client::{build_client, ProxyConfig};
 
 /// Count Tokens API 配置
@@ -103,7 +103,7 @@ pub fn count_tokens(text: &str) -> u64 {
 /// 估算请求的输入 tokens
 ///
 /// 优先调用远程 API，失败时回退到本地计算
-pub(crate) fn count_all_tokens(model: String, system: Option<Vec<SystemMessage>>, messages: Vec<Message>, tools: Option<Vec<Tool>>) -> u64 {
+pub(crate) fn count_all_tokens(model: String, system: Option<Vec<SystemMessage>>, messages: Vec<Message>, tools: Option<Vec<serde_json::Value>>) -> u64 {
     // 检查是否配置了远程 API
     if let Some(config) = get_config() {
         if let Some(api_url) = &config.api_url {
@@ -137,7 +137,7 @@ async fn call_remote_count_tokens(
     model: String,
     system: &Option<Vec<SystemMessage>>,
     messages: &Vec<Message>,
-    tools: &Option<Vec<Tool>>,
+    tools: &Option<Vec<serde_json::Value>>,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let client = build_client(config.proxy.as_ref(), 300)?;
 
@@ -177,7 +177,7 @@ async fn call_remote_count_tokens(
 }
 
 /// 本地计算请求的输入 tokens
-fn count_all_tokens_local(system: Option<Vec<SystemMessage>>, messages: Vec<Message>, tools: Option<Vec<Tool>>) -> u64 {
+fn count_all_tokens_local(system: Option<Vec<SystemMessage>>, messages: Vec<Message>, tools: Option<Vec<serde_json::Value>>) -> u64 {
     let mut total = 0;
 
     // 系统消息
@@ -203,12 +203,16 @@ fn count_all_tokens_local(system: Option<Vec<SystemMessage>>, messages: Vec<Mess
     // 工具定义
     if let Some(ref tools) = tools {
         for tool in tools {
-            total += count_tokens(&tool.name);
-            if let Some(ref desc) = tool.description {
+            if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
+                total += count_tokens(name);
+            }
+            if let Some(desc) = tool.get("description").and_then(|v| v.as_str()) {
                 total += count_tokens(desc);
             }
-            let input_schema_json = serde_json::to_string(&tool.input_schema).unwrap_or_default();
-            total += count_tokens(&input_schema_json);
+            if let Some(input_schema) = tool.get("input_schema") {
+                let input_schema_json = serde_json::to_string(input_schema).unwrap_or_default();
+                total += count_tokens(&input_schema_json);
+            }
         }
     }
 
