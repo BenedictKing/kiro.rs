@@ -113,9 +113,13 @@ pub struct Message {
 /// 系统消息
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SystemMessage {
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub message_type: Option<String>,
+    #[serde(rename = "type", default = "default_message_type")]
+    pub message_type: String,
     pub text: String,
+}
+
+fn default_message_type() -> String {
+    "text".to_string()
 }
 
 /// 工具定义
