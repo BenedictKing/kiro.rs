@@ -231,15 +231,28 @@ fn convert_tools(tools: &Option<Vec<serde_json::Value>>) -> Vec<Tool> {
         .iter()
         .filter_map(|t| {
             // 获取工具名称，如果没有 name 字段则跳过
-            let name = t.get("name")?.as_str()?;
+            let name = match t.get("name").and_then(|n| n.as_str()) {
+                Some(n) => n,
+                None => {
+                    tracing::debug!("跳过工具：缺少 name 字段");
+                    return None;
+                }
+            };
 
             // 跳过不支持的工具
             if is_unsupported_tool(name) {
+                tracing::debug!("跳过不支持的工具: {}", name);
                 return None;
             }
 
             // 获取 input_schema，如果没有则跳过（WebSearchTool 等特殊工具没有 input_schema）
-            let input_schema = t.get("input_schema")?;
+            let input_schema = match t.get("input_schema") {
+                Some(schema) => schema,
+                None => {
+                    tracing::debug!("跳过工具 '{}': 缺少 input_schema（可能是特殊工具如 WebSearchTool）", name);
+                    return None;
+                }
+            };
 
             // 获取描述（可选）
             let description = t.get("description")
@@ -266,7 +279,7 @@ fn convert_tools(tools: &Option<Vec<serde_json::Value>>) -> Vec<Tool> {
 
 /// 检查是否为不支持的工具
 fn is_unsupported_tool(name: &str) -> bool {
-    matches!(name.to_lowercase().as_str(), "web_search" | "websearch")
+    name.eq_ignore_ascii_case("web_search") || name.eq_ignore_ascii_case("websearch")
 }
 
 /// 生成thinking标签前缀
@@ -538,5 +551,79 @@ mod tests {
         assert!(is_unsupported_tool("websearch"));
         assert!(is_unsupported_tool("WebSearch"));
         assert!(!is_unsupported_tool("read_file"));
+    }
+
+    #[test]
+    fn test_convert_tools_skips_missing_name() {
+        // 缺少 name 字段的工具应被跳过
+        let tools = Some(vec![
+            serde_json::json!({
+                "description": "No name tool",
+                "input_schema": {"type": "object"}
+            }),
+            serde_json::json!({
+                "name": "valid_tool",
+                "input_schema": {"type": "object"}
+            }),
+        ]);
+
+        let result = convert_tools(&tools);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tool_specification.name, "valid_tool");
+    }
+
+    #[test]
+    fn test_convert_tools_skips_missing_input_schema() {
+        // 缺少 input_schema 的工具应被跳过（如 WebSearchTool）
+        let tools = Some(vec![
+            serde_json::json!({
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 5
+            }),
+            serde_json::json!({
+                "name": "valid_tool",
+                "description": "A valid tool",
+                "input_schema": {"type": "object"}
+            }),
+        ]);
+
+        let result = convert_tools(&tools);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tool_specification.name, "valid_tool");
+    }
+
+    #[test]
+    fn test_convert_tools_skips_unsupported() {
+        // 不支持的工具名称应被跳过
+        let tools = Some(vec![
+            serde_json::json!({
+                "name": "web_search",
+                "input_schema": {"type": "object"}
+            }),
+            serde_json::json!({
+                "name": "WebSearch",
+                "input_schema": {"type": "object"}
+            }),
+            serde_json::json!({
+                "name": "read_file",
+                "input_schema": {"type": "object"}
+            }),
+        ]);
+
+        let result = convert_tools(&tools);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tool_specification.name, "read_file");
+    }
+
+    #[test]
+    fn test_convert_tools_empty() {
+        let tools: Option<Vec<serde_json::Value>> = None;
+        let result = convert_tools(&tools);
+        assert!(result.is_empty());
+
+        let tools = Some(vec![]);
+        let result = convert_tools(&tools);
+        assert!(result.is_empty());
     }
 }

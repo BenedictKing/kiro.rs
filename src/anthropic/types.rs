@@ -1,7 +1,6 @@
 //! Anthropic API 类型定义
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // === 错误响应 ===
 
@@ -121,15 +120,6 @@ pub struct SystemMessage {
 
 fn default_message_type() -> String {
     "text".to_string()
-}
-
-/// 工具定义
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Tool {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub input_schema: HashMap<String, serde_json::Value>,
 }
 
 /// 内容块
