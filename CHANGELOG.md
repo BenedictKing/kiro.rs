@@ -23,6 +23,11 @@
   - 新增完整的账号信息类型定义（`AccountAggregateInfo`, `CreditsUsageSummary` 等）
 - 新增 `serde_cbor` 依赖用于 CBOR 编解码
 
+### Fixed
+- 修复手动查询余额后列表页面不显示缓存余额的问题
+  - `get_balance()` 成功后调用 `update_balance_cache()` 更新缓存
+  - 现在点击"查看余额"后，列表页面会正确显示缓存的余额值
+
 ### Changed
 - 调整重试策略：单凭据最大重试次数 3→2，单请求最大重试次数 9→5
   - `MAX_RETRIES_PER_CREDENTIAL`: 3 → 2

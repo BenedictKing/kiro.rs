@@ -101,6 +101,9 @@ impl AdminService {
             0.0
         };
 
+        // 更新缓存，使列表页面能显示最新余额
+        self.token_manager.update_balance_cache(id, remaining);
+
         Ok(BalanceResponse {
             id,
             subscription_title: usage.subscription_title().map(|s| s.to_string()),
