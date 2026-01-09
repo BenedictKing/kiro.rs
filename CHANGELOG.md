@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- 日志中的 `user_id` 现在会进行掩码处理，保护用户隐私
+  - 长度 > 25：保留前13后8字符（如 `user_f516339a***897ac7`）
+  - 长度 13-25：保留前4后4字符
+  - 长度 ≤ 12：完全掩码为 `***`
+
 ### Added
 - 新增缓存余额查询 API（`GET /credentials/balances/cached`）
   - 后端：`CachedBalanceInfo` 结构体、`get_all_cached_balances()` 方法
