@@ -6,6 +6,7 @@ import {
   resetCredentialFailure,
   getCredentialBalance,
   addCredential,
+  deleteCredential,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
@@ -68,6 +69,17 @@ export function useAddCredential() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (req: AddCredentialRequest) => addCredential(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 删除凭据
+export function useDeleteCredential() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => deleteCredential(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

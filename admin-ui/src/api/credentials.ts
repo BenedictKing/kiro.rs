@@ -78,3 +78,9 @@ export async function addCredential(
   const { data } = await api.post<AddCredentialResponse>('/credentials', req)
   return data
 }
+
+// 删除凭据
+export async function deleteCredential(id: number): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`)
+  return data
+}
