@@ -77,27 +77,19 @@ pub struct Bonus {
 
     /// 当前使用量
     #[serde(default)]
-    pub current_usage: i64,
-
-    /// 当前使用量（精确值）
-    #[serde(default)]
-    pub current_usage_with_precision: f64,
+    pub current_usage: f64,
 
     /// 使用限额
     #[serde(default)]
-    pub usage_limit: i64,
-
-    /// 使用限额（精确值）
-    #[serde(default)]
-    pub usage_limit_with_precision: f64,
+    pub usage_limit: f64,
 
     /// 状态 (ACTIVE / EXPIRED)
     #[serde(default)]
     pub status: Option<String>,
 
-    /// 过期时间 (RFC3339 格式)
+    /// 过期时间 (Unix 时间戳)
     #[serde(default)]
-    pub expires_at: Option<String>,
+    pub expires_at: Option<f64>,
 }
 
 /// 免费试用信息
@@ -138,14 +130,11 @@ impl Bonus {
             Some(s) => s.eq_ignore_ascii_case("ACTIVE"),
             None => {
                 // 没有 status 时：优先用 expires_at 判断是否仍有效；再用 limit/current 兜底。
-                if let Some(exp) = self.expires_at.as_deref() {
-                    if let Ok(dt) = DateTime::parse_from_rfc3339(exp) {
-                        return dt > Utc::now();
-                    }
+                if let Some(exp) = self.expires_at {
+                    let now = Utc::now().timestamp() as f64;
+                    return exp > now;
                 }
-                let limit = self.usage_limit_with_precision;
-                let current = self.current_usage_with_precision;
-                limit > 0.0 || current > 0.0
+                self.usage_limit > 0.0 || self.current_usage > 0.0
             }
         }
     }
@@ -199,7 +188,7 @@ impl UsageLimitsResponse {
             .map(|bs| {
                 bs.iter()
                     .filter(|b| b.is_active())
-                    .map(|b| b.usage_limit_with_precision)
+                    .map(|b| b.usage_limit)
                     .sum()
             })
             .unwrap_or(0.0);
@@ -232,7 +221,7 @@ impl UsageLimitsResponse {
             .map(|bs| {
                 bs.iter()
                     .filter(|b| b.is_active())
-                    .map(|b| b.current_usage_with_precision)
+                    .map(|b| b.current_usage)
                     .sum()
             })
             .unwrap_or(0.0);
