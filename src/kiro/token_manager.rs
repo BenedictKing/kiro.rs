@@ -405,6 +405,8 @@ pub enum DisableReason {
     ModelUnavailable,
     /// 手动禁用
     Manual,
+    /// 额度已用尽（如 MONTHLY_REQUEST_COUNT）
+    QuotaExceeded,
 }
 
 /// 单个凭据条目的状态
@@ -1274,7 +1276,7 @@ impl MultiTokenManager {
         }
 
         entry.disabled = true;
-        entry.disabled_reason = Some(DisabledReason::QuotaExceeded);
+        entry.disable_reason = Some(DisableReason::QuotaExceeded);
         // 设为阈值，便于在管理面板中直观看到该凭据已不可用
         entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
 
