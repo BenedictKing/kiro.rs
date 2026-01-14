@@ -1345,9 +1345,8 @@ impl MultiTokenManager {
 
     /// 初始化所有凭据的余额缓存
     ///
-    /// 启动时并发查询所有凭据的余额，更新缓存。
+    /// 启动时顺序查询所有凭据的余额，每次间隔 0.5 秒避免触发限流。
     /// 查询失败的凭据会被跳过（保持 initialized: false）。
-    /// 整体超时 30 秒，避免阻塞启动流程。
     ///
     /// # 返回
     /// - 成功初始化的凭据数量
@@ -1368,56 +1367,31 @@ impl MultiTokenManager {
 
         tracing::info!("正在初始化 {} 个凭据的余额...", credential_ids.len());
 
-        // 并发查询所有凭据的余额（带整体超时）
-        let futures: Vec<_> = credential_ids
-            .iter()
-            .map(|&id| async move {
-                match self.get_usage_limits_for(id).await {
-                    Ok(limits) => {
-                        // 计算剩余额度
-                        let used = limits.current_usage();
-                        let limit = limits.usage_limit();
-                        let remaining = (limit - used).max(0.0);
+        let mut success_count = 0;
 
-                        self.update_balance_cache(id, remaining);
-                        tracing::info!("凭据 #{} 余额初始化成功: {:.2}", id, remaining);
-                        Some((id, remaining))
-                    }
-                    Err(e) => {
-                        tracing::warn!("凭据 #{} 余额查询失败: {}", id, e);
-                        None
-                    }
+        // 顺序查询每个凭据的余额，间隔 0.5 秒避免触发限流
+        for (index, &id) in credential_ids.iter().enumerate() {
+            match self.get_usage_limits_for(id).await {
+                Ok(limits) => {
+                    // 计算剩余额度
+                    let used = limits.current_usage();
+                    let limit = limits.usage_limit();
+                    let remaining = (limit - used).max(0.0);
+
+                    self.update_balance_cache(id, remaining);
+                    tracing::info!("凭据 #{} 余额初始化成功: {:.2}", id, remaining);
+                    success_count += 1;
                 }
-            })
-            .collect();
-
-        // 整体超时 30 秒，避免阻塞启动
-        // 注意：即使超时，已完成的凭据缓存已在 future 内部更新
-        let results: Vec<Option<(u64, f64)>> = match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            futures::future::join_all(futures),
-        )
-        .await
-        {
-            Ok(results) => results,
-            Err(_) => {
-                // 超时时统计已初始化的凭据数量
-                let initialized_count = {
-                    let cache = self.balance_cache.lock();
-                    credential_ids
-                        .iter()
-                        .filter(|id| cache.get(id).map(|c| c.initialized).unwrap_or(false))
-                        .count()
-                };
-                tracing::warn!(
-                    "余额初始化超时（30秒），已完成 {}/{} 个凭据",
-                    initialized_count,
-                    credential_ids.len()
-                );
-                return initialized_count;
+                Err(e) => {
+                    tracing::warn!("凭据 #{} 余额查询失败: {}", id, e);
+                }
             }
-        };
-        let success_count = results.iter().filter(|r| r.is_some()).count();
+
+            // 非最后一个凭据时，间隔 0.5 秒
+            if index < credential_ids.len() - 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
 
         tracing::info!(
             "余额初始化完成: {}/{} 成功",

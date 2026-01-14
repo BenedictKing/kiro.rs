@@ -7,6 +7,10 @@
   - 加快模型暂时不可用后的自动恢复速度
 - 调整总重试次数硬上限：`MAX_TOTAL_RETRIES` 从 5 降至 3
   - 进一步减少无效重试开销，加快故障转移速度
+- 余额初始化改为顺序查询，每次间隔 0.5 秒避免触发限流
+  - 从并发查询改为顺序查询（`initialize_balances()`）
+  - 移除 30 秒整体超时机制
+  - 涉及文件：`src/kiro/token_manager.rs`
 
 ### Fixed
 - 修复 `MODEL_TEMPORARILY_UNAVAILABLE` 错误检测逻辑未实际调用的问题
