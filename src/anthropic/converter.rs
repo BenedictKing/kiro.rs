@@ -608,6 +608,7 @@ fn convert_assistant_message(
 
     // 组合 thinking 和 text 内容
     // 格式: <thinking>思考内容</thinking>\n\ntext内容
+    // 注意: Kiro API 要求 content 字段不能为空，当只有 tool_use 时需要占位符
     let final_content = if !thinking_content.is_empty() {
         if !text_content.is_empty() {
             format!(
@@ -617,6 +618,8 @@ fn convert_assistant_message(
         } else {
             format!("<thinking>{}</thinking>", thinking_content)
         }
+    } else if text_content.is_empty() && !tool_uses.is_empty() {
+        "OK".to_string()
     } else {
         text_content
     };
@@ -1068,5 +1071,70 @@ mod tests {
 
         // 重复的 tool_result 应该被过滤掉
         assert!(filtered.is_empty(), "重复的 tool_result 应该被过滤");
+    }
+
+    #[test]
+    fn test_convert_assistant_message_tool_use_only() {
+        use super::super::types::Message as AnthropicMessage;
+
+        // 测试仅包含 tool_use 的 assistant 消息（无 text 块）
+        // Kiro API 要求 content 字段不能为空
+        let msg = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "tool_use", "id": "toolu_01ABC", "name": "read_file", "input": {"path": "/test.txt"}}
+            ]),
+        };
+
+        let result = convert_assistant_message(&msg).expect("应该成功转换");
+
+        // 验证 content 不为空（使用占位符）
+        assert!(
+            !result.assistant_response_message.content.is_empty(),
+            "content 不应为空"
+        );
+        assert_eq!(
+            result.assistant_response_message.content, "OK",
+            "仅 tool_use 时应使用 'OK' 占位符"
+        );
+
+        // 验证 tool_uses 被正确保留
+        let tool_uses = result
+            .assistant_response_message
+            .tool_uses
+            .expect("应该有 tool_uses");
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0].tool_use_id, "toolu_01ABC");
+        assert_eq!(tool_uses[0].name, "read_file");
+    }
+
+    #[test]
+    fn test_convert_assistant_message_with_text_and_tool_use() {
+        use super::super::types::Message as AnthropicMessage;
+
+        // 测试同时包含 text 和 tool_use 的 assistant 消息
+        let msg = AnthropicMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!([
+                {"type": "text", "text": "Let me read that file for you."},
+                {"type": "tool_use", "id": "toolu_02XYZ", "name": "read_file", "input": {"path": "/data.json"}}
+            ]),
+        };
+
+        let result = convert_assistant_message(&msg).expect("应该成功转换");
+
+        // 验证 content 使用原始文本（不是占位符）
+        assert_eq!(
+            result.assistant_response_message.content,
+            "Let me read that file for you."
+        );
+
+        // 验证 tool_uses 被正确保留
+        let tool_uses = result
+            .assistant_response_message
+            .tool_uses
+            .expect("应该有 tool_uses");
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0].tool_use_id, "toolu_02XYZ");
     }
 }
