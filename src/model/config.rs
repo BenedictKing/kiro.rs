@@ -2,17 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum TlsBackend {
+    #[default]
     Rustls,
     NativeTls,
-}
-
-impl Default for TlsBackend {
-    fn default() -> Self {
-        Self::Rustls
-    }
 }
 
 /// KNA 应用配置

@@ -611,12 +611,14 @@ async fn call_mcp_api(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_has_web_search_tool_only_one() {
         use crate::anthropic::types::Message;
+        use crate::anthropic::types::Tool;
 
         let req = MessagesRequest {
             model: "claude-sonnet-4".to_string(),
@@ -627,11 +629,13 @@ mod tests {
             }],
             stream: true,
             system: None,
-            tools: Some(vec![serde_json::json!({
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 8
-            })]),
+            tools: Some(vec![Tool {
+                tool_type: Some("web_search_20250305".to_string()),
+                name: "web_search".to_string(),
+                description: String::new(),
+                input_schema: std::collections::HashMap::new(),
+                max_uses: Some(8),
+            }]),
             tool_choice: None,
             thinking: None,
             metadata: None,
@@ -643,6 +647,7 @@ mod tests {
     #[test]
     fn test_has_web_search_tool_multiple_tools() {
         use crate::anthropic::types::Message;
+        use crate::anthropic::types::Tool;
 
         let req = MessagesRequest {
             model: "claude-sonnet-4".to_string(),
@@ -654,16 +659,23 @@ mod tests {
             stream: true,
             system: None,
             tools: Some(vec![
-                serde_json::json!({
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                    "max_uses": 8
-                }),
-                serde_json::json!({
-                    "name": "other_tool",
-                    "description": "Other tool",
-                    "input_schema": {"type": "object"}
-                }),
+                Tool {
+                    tool_type: Some("web_search_20250305".to_string()),
+                    name: "web_search".to_string(),
+                    description: String::new(),
+                    input_schema: std::collections::HashMap::new(),
+                    max_uses: Some(8),
+                },
+                Tool {
+                    tool_type: None,
+                    name: "other_tool".to_string(),
+                    description: "Other tool".to_string(),
+                    input_schema: std::collections::HashMap::from([(
+                        "type".to_string(),
+                        serde_json::json!("object"),
+                    )]),
+                    max_uses: None,
+                },
             ]),
             tool_choice: None,
             thinking: None,

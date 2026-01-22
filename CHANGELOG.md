@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Changed
+- 改进凭据选择算法：同优先级内实现负载均衡
+  - 第一优先级：使用次数最少
+  - 第二优先级：余额最多（使用次数相同时）
+  - 第三优先级：轮询选择（使用次数和余额完全相同时，避免总选第一个）
+  - 新增 `selection_rr` 原子计数器用于轮询抖动
+  - 新增 `select_best_candidate_id()` 方法实现三级排序逻辑
+  - 涉及文件：`src/kiro/token_manager.rs`
+
+### Fixed
+- 修复测试代码使用 `serde_json::json!` 构造 Tool 对象导致的类型不匹配问题
+  - 改用 `Tool` 结构体直接构造，确保类型安全
+  - 涉及文件：`src/anthropic/websearch.rs`
+- 修复 `select_best_candidate_id()` 中 NaN 余额处理问题
+  - 在评分阶段将 NaN/Infinity 余额归一化为 0.0
+  - 避免 NaN 被 `total_cmp` 视为最大值导致错误的凭据选择
+  - 避免 NaN 导致 `scored` 被完全过滤后除零 panic
+  - 涉及文件：`src/kiro/token_manager.rs`
+
 ### Added
 - 新增 `system` 字段格式兼容性支持（`src/anthropic/types.rs`）
   - 支持字符串格式：`"system": "You are a helpful assistant"`（new-api 等网关添加的系统提示词）

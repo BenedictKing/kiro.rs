@@ -7,7 +7,7 @@ use anyhow::bail;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
 use serde::Serialize;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::sync::Mutex as TokioMutex;
 
 use std::path::PathBuf;
@@ -557,6 +557,8 @@ pub struct MultiTokenManager {
     is_multiple_format: bool,
     /// MODEL_TEMPORARILY_UNAVAILABLE 错误计数
     model_unavailable_count: AtomicU32,
+    /// 选择抖动计数器（用于同权重候选的轮询，避免总选第一个）
+    selection_rr: AtomicU64,
     /// 全局禁用恢复时间（None 表示未被全局禁用）
     global_recovery_time: Mutex<Option<DateTime<Utc>>>,
     /// 用户亲和性管理器
@@ -677,6 +679,7 @@ impl MultiTokenManager {
             credentials_path,
             is_multiple_format,
             model_unavailable_count: AtomicU32::new(0),
+            selection_rr: AtomicU64::new(0),
             global_recovery_time: Mutex::new(None),
             affinity: UserAffinityManager::new(),
             balance_cache: Mutex::new(initial_cache),
@@ -709,6 +712,50 @@ impl MultiTokenManager {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
     }
 
+    /// 选择最佳凭据（两级排序：使用次数最少 + 余额最多；完全相同则轮询）
+    fn select_best_candidate_id(&self, candidate_ids: &[u64]) -> Option<u64> {
+        if candidate_ids.is_empty() {
+            return None;
+        }
+
+        let rr = self.selection_rr.fetch_add(1, Ordering::Relaxed) as usize;
+        let cache = self.balance_cache.lock();
+
+        let mut scored: Vec<(u64, u32, f64)> = Vec::with_capacity(candidate_ids.len());
+        for &id in candidate_ids {
+            let (usage, balance, initialized) = cache
+                .get(&id)
+                .map(|c| (c.recent_usage, c.remaining, c.initialized))
+                .unwrap_or((0, 0.0, false));
+            // 未初始化的凭据视为使用次数最大，避免被优先选中
+            let effective_usage = if initialized { usage } else { u32::MAX };
+            // NaN 余额归一化为 0.0，避免 total_cmp 将 NaN 视为最大值
+            let effective_balance = if balance.is_finite() { balance } else { 0.0 };
+            scored.push((id, effective_usage, effective_balance));
+        }
+
+        // 第一优先级：使用次数最少
+        let min_usage = scored.iter().map(|(_, usage, _)| *usage).min()?;
+        scored.retain(|(_, usage, _)| *usage == min_usage);
+
+        // 第二优先级：余额最多（使用次数相同）
+        let mut max_balance = scored.first().map(|(_, _, b)| *b).unwrap_or(0.0);
+        for &(_, _, balance) in &scored {
+            if balance > max_balance {
+                max_balance = balance;
+            }
+        }
+        scored.retain(|(_, _, balance)| *balance == max_balance);
+
+        if scored.len() == 1 {
+            return Some(scored[0].0);
+        }
+
+        // 兜底：完全相同则轮询，避免总选第一个
+        let index = rr % scored.len();
+        Some(scored[index].0)
+    }
+
     /// 获取 API 调用上下文
     ///
     /// 返回绑定了 id、credentials 和 token 的调用上下文
@@ -733,17 +780,17 @@ impl MultiTokenManager {
                 );
             }
 
-            let (id, credentials) = {
+            let candidate_infos: Vec<(u64, u32)> = {
                 let mut entries = self.entries.lock();
 
-                // 选择优先级最高的可用凭据（排除已尝试过的）
-                let mut best = entries
+                let mut candidates: Vec<(u64, u32)> = entries
                     .iter()
                     .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                    .min_by_key(|e| e.credentials.priority);
+                    .map(|e| (e.id, e.credentials.priority))
+                    .collect();
 
                 // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
-                if best.is_none()
+                if candidates.is_empty()
                     && entries.iter().any(|e| {
                         e.disabled && e.auto_heal_reason == Some(AutoHealReason::TooManyFailures)
                     })
@@ -759,18 +806,40 @@ impl MultiTokenManager {
                             e.failure_count = 0;
                         }
                     }
-                    best = entries
+
+                    candidates = entries
                         .iter()
                         .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                        .min_by_key(|e| e.credentials.priority);
+                        .map(|e| (e.id, e.credentials.priority))
+                        .collect();
                 }
 
-                if let Some(entry) = best {
-                    (entry.id, entry.credentials.clone())
-                } else {
+                if candidates.is_empty() {
                     let available = entries.iter().filter(|e| !e.disabled).count();
                     anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                 }
+
+                candidates
+            };
+
+            // 按优先级选出候选集合，再在同优先级内做负载均衡选择
+            let min_priority = candidate_infos.iter().map(|(_, p)| *p).min().unwrap_or(0);
+            let candidate_ids: Vec<u64> = candidate_infos
+                .iter()
+                .filter(|(_, p)| *p == min_priority)
+                .map(|(id, _)| *id)
+                .collect();
+            let id = self
+                .select_best_candidate_id(&candidate_ids)
+                .ok_or_else(|| anyhow::anyhow!("没有可用凭据"))?;
+
+            let credentials = {
+                let entries = self.entries.lock();
+                entries
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.credentials.clone())
+                    .ok_or_else(|| anyhow::anyhow!("凭据 #{} 不存在", id))?
             };
 
             // 尝试获取/刷新 Token
@@ -837,31 +906,7 @@ impl MultiTokenManager {
                 .collect()
         };
 
-        // 两级排序：先按使用次数升序，再按余额降序
-        // 注意：未初始化的凭据使用 u32::MAX 作为使用次数，避免被优先选中
-        let best_candidate = {
-            let cache = self.balance_cache.lock();
-            candidates
-                .into_iter()
-                .map(|id| {
-                    let (usage, balance, initialized) = cache
-                        .get(&id)
-                        .map(|c| (c.recent_usage, c.remaining, c.initialized))
-                        .unwrap_or((0, 0.0, false));
-                    // 未初始化的凭据视为使用次数最大，避免被优先选中
-                    let effective_usage = if initialized { usage } else { u32::MAX };
-                    (id, effective_usage, balance)
-                })
-                .min_by(|(_, usage_a, bal_a), (_, usage_b, bal_b)| {
-                    // 先按使用次数升序，使用次数相同时按余额降序
-                    usage_a.cmp(usage_b).then_with(|| {
-                        bal_b
-                            .partial_cmp(bal_a)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                })
-                .map(|(id, _, _)| id)
-        };
+        let best_candidate = self.select_best_candidate_id(&candidates);
 
         if let Some(id) = best_candidate {
             let credentials = {
@@ -1681,6 +1726,7 @@ impl MultiTokenManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -1866,6 +1912,48 @@ mod tests {
         let ctx = manager.acquire_context().await.unwrap();
         assert!(ctx.token == "t1" || ctx.token == "t2");
         assert_eq!(manager.available_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_acquire_context_prefers_higher_balance_when_usage_equal() {
+        let config = Config::default();
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        // 两个凭据使用次数都为 0 时，应优先选择余额更高的
+        manager.update_balance_cache(1, 100.0);
+        manager.update_balance_cache(2, 200.0);
+
+        let ctx = manager.acquire_context().await.unwrap();
+        assert_eq!(ctx.id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_acquire_context_round_robin_when_balance_and_usage_equal() {
+        let config = Config::default();
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        manager.update_balance_cache(1, 100.0);
+        manager.update_balance_cache(2, 100.0);
+
+        let ctx1 = manager.acquire_context().await.unwrap();
+        let ctx2 = manager.acquire_context().await.unwrap();
+        assert_ne!(ctx1.id, ctx2.id);
     }
 
     #[test]
