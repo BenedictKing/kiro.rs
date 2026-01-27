@@ -608,7 +608,7 @@ fn convert_assistant_message(
             format!("<thinking>{}</thinking>", thinking_content)
         }
     } else if text_content.is_empty() && !tool_uses.is_empty() {
-        "There is a tool use.".to_string()
+        " ".to_string()
     } else {
         text_content
     };
@@ -1083,8 +1083,8 @@ mod tests {
             "content 不应为空"
         );
         assert_eq!(
-            result.assistant_response_message.content, "There is a tool use.",
-            "仅 tool_use 时应使用 'There is a tool use.' 占位符"
+            result.assistant_response_message.content, " ",
+            "仅 tool_use 时应使用 ' ' 占位符"
         );
 
         // 验证 tool_uses 被正确保留
