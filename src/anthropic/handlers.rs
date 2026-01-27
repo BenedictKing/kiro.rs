@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt, stream};
 use serde_json::json;
 use std::time::Duration;
-use tokio::time::{Instant, interval, interval_at};
+use tokio::time::{Instant, interval_at};
 use uuid::Uuid;
 
 use super::converter::{ConversionError, convert_request};
@@ -676,7 +676,14 @@ pub async fn post_messages_cc(
     } else {
         // 非流式响应（复用现有逻辑，已经使用正确的 input_tokens）
         let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.as_deref());
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, user_id).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            &payload.model,
+            input_tokens,
+            user_id,
+        )
+        .await
     }
 }
 
@@ -736,6 +743,8 @@ fn create_buffered_sse_stream(
     ctx: BufferedStreamContext,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let body_stream = response.bytes_stream();
+    let ping_period = Duration::from_secs(PING_INTERVAL_SECS);
+    let ping_interval = interval_at(Instant::now() + ping_period, ping_period);
 
     stream::unfold(
         (
@@ -743,7 +752,7 @@ fn create_buffered_sse_stream(
             ctx,
             EventStreamDecoder::new(),
             false,
-            interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            ping_interval,
         ),
         |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
             if finished {

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- 修复 `/cc/v1/messages` 缓冲流 ping 定时器首次立即触发的问题
+  - 将 `interval()` 改为 `interval_at(Instant::now() + ping_period, ping_period)`
+  - 现在首个 ping 会在 25 秒后触发，与 `/v1/messages` 行为一致
+  - 涉及文件：`src/anthropic/handlers.rs`
+- 修复 Clippy `collapsible_if` 警告
+  - 使用 let-chains 语法合并嵌套 if 语句
+  - 涉及文件：`src/anthropic/stream.rs`
+
 ### Changed
 - 改进凭据选择算法：同优先级内实现负载均衡
   - 第一优先级：使用次数最少
