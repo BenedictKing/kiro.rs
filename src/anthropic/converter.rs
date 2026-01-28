@@ -379,6 +379,16 @@ fn validate_tool_pairing(history: &[Message], tool_results: &[ToolResult]) -> Ve
 }
 
 /// 转换工具定义
+///
+/// # 不支持的工具类型
+///
+/// 以下工具类型会被自动过滤（Kiro API 当前不支持）：
+/// - `web_search_*`: Anthropic 的 Web 搜索工具（如 `web_search_20250305`）
+///
+/// **TODO**: 如果 Kiro API 未来支持 web_search，需要：
+/// 1. 移除下方的 `filter` 过滤逻辑
+/// 2. 添加 web_search 工具的转换逻辑（可能需要特殊处理 `max_uses` 等字段）
+/// 3. 更新相关测试用例
 fn convert_tools(tools: &Option<Vec<super::types::Tool>>) -> Vec<Tool> {
     let Some(tools) = tools else {
         return Vec::new();
@@ -386,6 +396,22 @@ fn convert_tools(tools: &Option<Vec<super::types::Tool>>) -> Vec<Tool> {
 
     tools
         .iter()
+        .filter(|t| {
+            // 过滤掉 web_search 类型的工具（Kiro API 当前不支持）
+            // 工具类型格式: "web_search_20250305"
+            let dominated = t
+                .tool_type
+                .as_ref()
+                .is_some_and(|ty| ty.starts_with("web_search"));
+            if dominated {
+                tracing::debug!(
+                    "过滤不支持的工具: name={}, type={:?}",
+                    t.name,
+                    t.tool_type
+                );
+            }
+            !dominated
+        })
         .map(|t| {
             let description = t.description.clone();
             // 限制描述长度为 10000 字符（安全截断 UTF-8，单次遍历）
@@ -1125,5 +1151,80 @@ mod tests {
             .expect("应该有 tool_uses");
         assert_eq!(tool_uses.len(), 1);
         assert_eq!(tool_uses[0].tool_use_id, "toolu_02XYZ");
+    }
+
+    #[test]
+    fn test_convert_tools_filters_web_search() {
+        use super::super::types::Tool as AnthropicTool;
+        use std::collections::HashMap;
+
+        // 测试 web_search 工具被过滤
+        // Kiro API 当前不支持 web_search，需要自动过滤
+        let tools = vec![
+            // web_search 工具（应被过滤）
+            AnthropicTool {
+                tool_type: Some("web_search_20250305".to_string()),
+                name: "web_search".to_string(),
+                description: String::new(),
+                input_schema: HashMap::new(),
+                max_uses: Some(8),
+            },
+            // 普通工具（应保留）
+            AnthropicTool {
+                tool_type: None,
+                name: "read_file".to_string(),
+                description: "Read a file from disk".to_string(),
+                input_schema: {
+                    let mut schema = HashMap::new();
+                    schema.insert(
+                        "type".to_string(),
+                        serde_json::json!("object"),
+                    );
+                    schema
+                },
+                max_uses: None,
+            },
+        ];
+
+        let converted = convert_tools(&Some(tools));
+
+        // 应该只有 1 个工具（web_search 被过滤）
+        assert_eq!(converted.len(), 1, "web_search 应该被过滤");
+        assert_eq!(
+            converted[0].tool_specification.name, "read_file",
+            "只应保留 read_file 工具"
+        );
+    }
+
+    #[test]
+    fn test_convert_tools_filters_all_web_search_variants() {
+        use super::super::types::Tool as AnthropicTool;
+        use std::collections::HashMap;
+
+        // 测试所有 web_search 变体都被过滤
+        let tools = vec![
+            AnthropicTool {
+                tool_type: Some("web_search_20250305".to_string()),
+                name: "web_search".to_string(),
+                description: String::new(),
+                input_schema: HashMap::new(),
+                max_uses: Some(8),
+            },
+            AnthropicTool {
+                tool_type: Some("web_search_20260101".to_string()), // 假设的未来版本
+                name: "web_search".to_string(),
+                description: String::new(),
+                input_schema: HashMap::new(),
+                max_uses: Some(10),
+            },
+        ];
+
+        let converted = convert_tools(&Some(tools));
+
+        // 所有 web_search 工具都应被过滤
+        assert!(
+            converted.is_empty(),
+            "所有 web_search 变体都应被过滤"
+        );
     }
 }
