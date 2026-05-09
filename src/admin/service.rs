@@ -818,6 +818,7 @@ impl AdminService {
             prompt_cache_ttl_seconds: config.prompt_cache_ttl_seconds,
             prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
             default_endpoint: config.default_endpoint.clone(),
+            service_endpoint_family: config.service_endpoint_family,
             compression: super::types::CompressionConfigResponse {
                 enabled: c.enabled,
                 whitespace_compression: c.whitespace_compression,
@@ -891,6 +892,10 @@ impl AdminService {
                 config.default_endpoint = trimmed.to_string();
             }
 
+            if let Some(family) = req.service_endpoint_family {
+                config.service_endpoint_family = family;
+            }
+
             if let Some(c) = &req.compression {
                 Self::apply_compression_fields(&mut config.compression, c);
             }
@@ -923,6 +928,12 @@ impl AdminService {
             {
                 tracing::warn!("热更新 KiroProvider default_endpoint 失败: {}", e);
             }
+        }
+
+        // 热更新 Kiro 服务端点域名族
+        if req.service_endpoint_family.is_some() {
+            self.token_manager
+                .update_service_endpoint_family(config.service_endpoint_family);
         }
 
         // 热更新 Prompt Cache 运行时配置
@@ -1053,6 +1064,7 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("cli".to_string()),
+            service_endpoint_family: None,
             compression: None,
         };
 
@@ -1077,6 +1089,7 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("".to_string()),
+            service_endpoint_family: None,
             compression: None,
         };
 
@@ -1100,6 +1113,7 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("   ".to_string()),
+            service_endpoint_family: None,
             compression: None,
         };
 
@@ -1123,6 +1137,7 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("unknown".to_string()),
+            service_endpoint_family: None,
             compression: None,
         };
 
@@ -1143,6 +1158,7 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             default_endpoint: Some("  cli  ".to_string()),
+            service_endpoint_family: None,
             compression: None,
         };
 
@@ -1162,5 +1178,39 @@ mod tests {
         let service = create_test_service();
         let config = service.get_global_config();
         assert_eq!(config.default_endpoint, "ide"); // Config::default() 的默认值
+    }
+
+    #[tokio::test]
+    async fn test_update_global_config_service_endpoint_family() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateGlobalConfigRequest {
+            region: None,
+            credential_rpm: None,
+            prompt_cache_ttl_seconds: None,
+            prompt_cache_accounting_enabled: None,
+            default_endpoint: None,
+            service_endpoint_family: Some(crate::model::config::ServiceEndpointFamily::Kiro),
+            compression: None,
+        };
+
+        let result = service.update_global_config(req).await;
+        assert!(result.is_ok());
+
+        let config = service.get_global_config();
+        assert_eq!(
+            config.service_endpoint_family,
+            crate::model::config::ServiceEndpointFamily::Kiro
+        );
+        assert_eq!(
+            service.token_manager.config().service_endpoint_family,
+            crate::model::config::ServiceEndpointFamily::Kiro
+        );
+
+        let persisted = read_persisted_config(&service);
+        assert_eq!(
+            persisted.service_endpoint_family,
+            crate::model::config::ServiceEndpointFamily::Kiro
+        );
     }
 }

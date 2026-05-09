@@ -1131,7 +1131,7 @@ mod tests {
         CliEndpoint, IdeEndpoint, default_is_bearer_token_invalid, default_is_monthly_request_limit,
     };
     use crate::kiro::model::credentials::KiroCredentials;
-    use crate::model::config::Config;
+    use crate::model::config::{Config, ServiceEndpointFamily};
     use reqwest::header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, HeaderValue};
 
     fn create_test_provider(config: Config, credentials: KiroCredentials) -> KiroProvider {
@@ -1153,6 +1153,44 @@ mod tests {
         };
         assert!(endpoint.api_url(&ctx).contains("amazonaws.com"));
         assert!(endpoint.api_url(&ctx).contains("generateAssistantResponse"));
+    }
+
+    #[test]
+    fn test_cli_endpoint_kiro_family_uses_runtime_and_management_hosts() {
+        let mut config = Config::default();
+        config.service_endpoint_family = ServiceEndpointFamily::Kiro;
+        config.region = "us-west-2".to_string();
+        let credentials = KiroCredentials::default();
+        let endpoint = CliEndpoint::new();
+        let machine_id = "a".repeat(64);
+        let ctx = RequestContext {
+            credentials: &credentials,
+            token: "test_token",
+            machine_id: &machine_id,
+            config: &config,
+        };
+
+        assert_eq!(
+            endpoint.api_url(&ctx),
+            "https://runtime.us-west-2.kiro.dev/generateAssistantResponse"
+        );
+        assert_eq!(
+            endpoint.mcp_url(&ctx),
+            "https://runtime.us-west-2.kiro.dev/mcp"
+        );
+
+        let usage = endpoint.usage_request_parts(&ctx).unwrap();
+        assert!(
+            usage
+                .url
+                .starts_with("https://management.us-west-2.kiro.dev/")
+        );
+        assert!(
+            usage
+                .headers
+                .iter()
+                .any(|(name, value)| *name == "host" && value == "management.us-west-2.kiro.dev")
+        );
     }
 
     #[test]
@@ -1232,6 +1270,44 @@ mod tests {
         };
         assert!(endpoint.api_url(&ctx).contains("amazonaws.com"));
         assert!(endpoint.api_url(&ctx).contains("generateAssistantResponse"));
+    }
+
+    #[test]
+    fn test_ide_endpoint_kiro_family_uses_runtime_and_management_hosts() {
+        let mut config = Config::default();
+        config.service_endpoint_family = ServiceEndpointFamily::Kiro;
+        config.region = "us-east-1".to_string();
+        let credentials = KiroCredentials::default();
+        let endpoint = IdeEndpoint::new();
+        let machine_id = "a".repeat(64);
+        let ctx = RequestContext {
+            credentials: &credentials,
+            token: "test_token",
+            machine_id: &machine_id,
+            config: &config,
+        };
+
+        assert_eq!(
+            endpoint.api_url(&ctx),
+            "https://runtime.us-east-1.kiro.dev/generateAssistantResponse"
+        );
+        assert_eq!(
+            endpoint.mcp_url(&ctx),
+            "https://runtime.us-east-1.kiro.dev/mcp"
+        );
+
+        let usage = endpoint.usage_request_parts(&ctx).unwrap();
+        assert!(
+            usage
+                .url
+                .starts_with("https://management.us-east-1.kiro.dev/")
+        );
+        assert!(
+            usage
+                .headers
+                .iter()
+                .any(|(name, value)| *name == "host" && value == "management.us-east-1.kiro.dev")
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
   const [promptCacheTtlSeconds, setPromptCacheTtlSeconds] = useState('300')
   const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] = useState(true)
   const [defaultEndpoint, setDefaultEndpoint] = useState('ide')
+  const [serviceEndpointFamily, setServiceEndpointFamily] = useState<'legacy' | 'kiro'>('legacy')
 
   // 代理设置
   const [proxyUrl, setProxyUrl] = useState('')
@@ -63,6 +64,7 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
       setPromptCacheTtlSeconds(globalConfig.promptCacheTtlSeconds.toString())
       setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
       setDefaultEndpoint(globalConfig.defaultEndpoint || 'ide')
+      setServiceEndpointFamily(globalConfig.serviceEndpointFamily || 'legacy')
       const c = globalConfig.compression
       setCEnabled(c.enabled)
       setCWhitespace(c.whitespaceCompression)
@@ -113,6 +115,11 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
 
     if (defaultEndpoint !== (globalConfig?.defaultEndpoint || 'ide')) {
       globalPayload.defaultEndpoint = defaultEndpoint
+      hasGlobalChanges = true
+    }
+
+    if (serviceEndpointFamily !== (globalConfig?.serviceEndpointFamily || 'legacy')) {
+      globalPayload.serviceEndpointFamily = serviceEndpointFamily
       hasGlobalChanges = true
     }
 
@@ -241,6 +248,20 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
                   <option value="cli">cli</option>
                 </select>
                 <p className="text-xs text-muted-foreground">凭据未显式指定 endpoint 时使用此默认值</p>
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="gcServiceEndpointFamily" className="text-sm font-medium">服务 Endpoint 域名族</label>
+                <select
+                  id="gcServiceEndpointFamily"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={serviceEndpointFamily}
+                  onChange={(e) => setServiceEndpointFamily(e.target.value as 'legacy' | 'kiro')}
+                  disabled={isPending}
+                >
+                  <option value="legacy">legacy: q.&lt;region&gt;.amazonaws.com</option>
+                  <option value="kiro">kiro: *.&lt;region&gt;.kiro.dev</option>
+                </select>
+                <p className="text-xs text-muted-foreground">legacy 保持旧行为；kiro 使用 runtime/management 官方域名</p>
               </div>
             </div>
 

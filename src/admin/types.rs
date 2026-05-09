@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::config::ServiceEndpointFamily;
+
 // ============ 凭据状态 ============
 
 /// 所有凭据状态响应
@@ -399,6 +401,8 @@ pub struct GlobalConfigResponse {
     pub prompt_cache_accounting_enabled: bool,
     /// 默认端点名称（凭据未显式指定 endpoint 时使用）
     pub default_endpoint: String,
+    /// Kiro 服务端点域名族
+    pub service_endpoint_family: ServiceEndpointFamily,
     /// 压缩配置
     pub compression: CompressionConfigResponse,
 }
@@ -434,6 +438,8 @@ pub struct UpdateGlobalConfigRequest {
     pub prompt_cache_accounting_enabled: Option<bool>,
     /// 默认端点名称（可选）
     pub default_endpoint: Option<String>,
+    /// Kiro 服务端点域名族（可选）
+    pub service_endpoint_family: Option<ServiceEndpointFamily>,
     /// 压缩配置（可选）
     pub compression: Option<UpdateCompressionConfigRequest>,
 }

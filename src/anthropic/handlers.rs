@@ -11,7 +11,7 @@ use axum::{
     Json as JsonExtractor,
     body::Body,
     extract::{OriginalUri, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
 use bytes::Bytes;
@@ -588,6 +588,21 @@ fn mask_user_id(user_id: Option<&str>) -> String {
     }
 }
 
+fn extract_affinity_user_id(headers: &HeaderMap, payload: &MessagesRequest) -> Option<String> {
+    get_trimmed_header(headers, "x-kiro-session-id")
+        .or_else(|| get_trimmed_header(headers, "x-session-id"))
+        .or_else(|| payload.metadata.as_ref().and_then(|m| m.user_id.clone()))
+}
+
+fn get_trimmed_header(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 /// 剔除 messages 中的空 text content block（`{"type":"text","text":""}` 或纯空白）。
 ///
 /// 说明：
@@ -865,6 +880,7 @@ pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
 pub async fn post_messages(
     OriginalUri(uri): OriginalUri,
     State(state): State<AppState>,
+    headers: HeaderMap,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
@@ -874,8 +890,8 @@ pub async fn post_messages(
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
 
-    // 提取 user_id 用于凭据亲和性
-    let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.clone());
+    // 提取用户/会话标识用于凭据亲和性。显式 header 优先，兼容 metadata.user_id。
+    let user_id = extract_affinity_user_id(&headers, &payload);
 
     // 估算压缩前 input tokens（需在 convert_request 之前，因为后者会消费压缩）
     let estimated_input_tokens = token::count_all_tokens(
@@ -1765,10 +1781,11 @@ fn is_likely_base64(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anthropic::types::{Message, SystemMessage};
+    use crate::anthropic::types::{Message, Metadata, SystemMessage};
     use crate::kiro::model::requests::conversation::{
         ConversationState, CurrentMessage, KiroImage, Message as KiroMessage, UserInputMessage,
     };
+    use axum::http::HeaderValue;
 
     fn sample_messages_request() -> MessagesRequest {
         // 生成一个超过 1024 tokens 的 system message 用于测试缓存
@@ -1813,6 +1830,53 @@ mod tests {
             output_config: None,
             metadata: None,
         }
+    }
+
+    #[test]
+    fn test_extract_affinity_user_id_uses_kiro_session_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-kiro-session-id", HeaderValue::from_static(" session-1 "));
+        headers.insert("x-session-id", HeaderValue::from_static("session-2"));
+
+        let mut payload = sample_messages_request();
+        payload.metadata = Some(Metadata {
+            user_id: Some("metadata-user".to_string()),
+        });
+
+        assert_eq!(
+            extract_affinity_user_id(&headers, &payload),
+            Some("session-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_affinity_user_id_falls_back_to_metadata() {
+        let headers = HeaderMap::new();
+        let mut payload = sample_messages_request();
+        payload.metadata = Some(Metadata {
+            user_id: Some("metadata-user".to_string()),
+        });
+
+        assert_eq!(
+            extract_affinity_user_id(&headers, &payload),
+            Some("metadata-user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_affinity_user_id_ignores_blank_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-kiro-session-id", HeaderValue::from_static("  "));
+
+        let mut payload = sample_messages_request();
+        payload.metadata = Some(Metadata {
+            user_id: Some("metadata-user".to_string()),
+        });
+
+        assert_eq!(
+            extract_affinity_user_id(&headers, &payload),
+            Some("metadata-user".to_string())
+        );
     }
 
     #[test]

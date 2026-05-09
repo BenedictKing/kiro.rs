@@ -361,6 +361,7 @@ export interface GlobalConfigResponse {
   promptCacheTtlSeconds: number
   promptCacheAccountingEnabled: boolean
   defaultEndpoint: string
+  serviceEndpointFamily: 'legacy' | 'kiro'
   compression: CompressionConfigResponse
 }
 
@@ -384,5 +385,6 @@ export interface UpdateGlobalConfigRequest {
   promptCacheTtlSeconds?: number
   promptCacheAccountingEnabled?: boolean
   defaultEndpoint?: string
+  serviceEndpointFamily?: 'legacy' | 'kiro'
   compression?: UpdateCompressionConfigRequest
 }

@@ -189,6 +189,7 @@ docker-compose up
 | `credentialRpm` | number | - | 单凭据目标 RPM（每分钟请求数），用于凭据级节流/分流；`0` 或未配置表示使用内置默认策略 |
 | `promptCacheTtlSeconds` | number | `300` | 本地 Prompt Cache TTL（秒） |
 | `promptCacheAccountingEnabled` | boolean | `true` | 是否启用本地 Prompt Cache usage 记账；关闭后不再输出或扣减 cache token |
+| `serviceEndpointFamily` | string | `legacy` | Kiro 服务端点域名族：`legacy` 使用 `q.<region>.amazonaws.com`；`kiro` 使用 `runtime.<region>.kiro.dev` 和 `management.<region>.kiro.dev` |
 
 完整配置示例：
 
@@ -214,7 +215,8 @@ docker-compose up
    "adminApiKey": "sk-admin-your-secret-key",
    "credentialRpm": 5,
    "promptCacheTtlSeconds": 300,
-   "promptCacheAccountingEnabled": true
+   "promptCacheAccountingEnabled": true,
+   "serviceEndpointFamily": "legacy"
 }
 ```
 
@@ -376,6 +378,12 @@ RUST_LOG=debug ./target/release/kiro-rs
 | `/v1/models` | GET | 获取可用模型列表 |
 | `/v1/messages` | POST | 创建消息（对话） |
 | `/v1/messages/count_tokens` | POST | 估算 Token 数量 |
+
+### 粘性会话
+
+`/v1/messages` 支持通过 `x-kiro-session-id` 指定会话标识。多凭据模式下，同一会话会尽量复用同一个凭据；当该凭据触发短时限流或冷却时，本次请求会自动分流到其他可用凭据。
+
+兼容的 fallback 顺序：`x-kiro-session-id` → `x-session-id` → `metadata.user_id`。
 
 ### Thinking 模式
 

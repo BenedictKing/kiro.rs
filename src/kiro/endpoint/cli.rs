@@ -3,7 +3,7 @@
 use reqwest::RequestBuilder;
 use uuid::Uuid;
 
-use super::{KiroEndpoint, RequestContext, UsageRequestParts};
+use super::{KiroEndpoint, KiroService, RequestContext, UsageRequestParts, service_host};
 
 pub const CLI_ENDPOINT_NAME: &str = "cli";
 const CLI_ORIGIN: &str = "KIRO_CLI";
@@ -22,10 +22,11 @@ impl CliEndpoint {
     }
 
     fn host(&self, ctx: &RequestContext<'_>) -> String {
-        format!(
-            "q.{}.amazonaws.com",
-            ctx.credentials.effective_api_region(ctx.config)
-        )
+        service_host(ctx, KiroService::Runtime)
+    }
+
+    fn management_host(&self, ctx: &RequestContext<'_>) -> String {
+        service_host(ctx, KiroService::Management)
     }
 
     fn api_origin(&self) -> &'static str {
@@ -108,17 +109,11 @@ impl KiroEndpoint for CliEndpoint {
     }
 
     fn api_url(&self, ctx: &RequestContext<'_>) -> String {
-        format!(
-            "https://q.{}.amazonaws.com/generateAssistantResponse",
-            ctx.credentials.effective_api_region(ctx.config)
-        )
+        format!("https://{}/generateAssistantResponse", self.host(ctx))
     }
 
     fn mcp_url(&self, ctx: &RequestContext<'_>) -> String {
-        format!(
-            "https://q.{}.amazonaws.com/mcp",
-            ctx.credentials.effective_api_region(ctx.config)
-        )
+        format!("https://{}/mcp", self.host(ctx))
     }
 
     fn decorate_api(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder {
@@ -164,7 +159,7 @@ impl KiroEndpoint for CliEndpoint {
     }
 
     fn usage_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts> {
-        let host = self.host(ctx);
+        let host = self.management_host(ctx);
         let url = format!(
             "https://{}/getUsageLimits?origin={}&resourceType=AGENTIC_REQUEST",
             host,

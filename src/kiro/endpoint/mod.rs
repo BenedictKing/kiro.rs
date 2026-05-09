@@ -6,7 +6,7 @@
 use reqwest::RequestBuilder;
 
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::model::config::Config;
+use crate::model::config::{Config, ServiceEndpointFamily};
 
 pub mod cli;
 pub mod ide;
@@ -52,6 +52,25 @@ pub struct RequestContext<'a> {
     pub token: &'a str,
     pub machine_id: &'a str,
     pub config: &'a Config,
+}
+
+pub enum KiroService {
+    Runtime,
+    Management,
+}
+
+pub fn service_host(ctx: &RequestContext<'_>, service: KiroService) -> String {
+    let region = ctx.credentials.effective_api_region(ctx.config);
+
+    match (ctx.config.service_endpoint_family, service) {
+        (ServiceEndpointFamily::Legacy, _) => format!("q.{}.amazonaws.com", region),
+        (ServiceEndpointFamily::Kiro, KiroService::Runtime) => {
+            format!("runtime.{}.kiro.dev", region)
+        }
+        (ServiceEndpointFamily::Kiro, KiroService::Management) => {
+            format!("management.{}.kiro.dev", region)
+        }
+    }
 }
 
 pub fn default_is_monthly_request_limit(body: &str) -> bool {

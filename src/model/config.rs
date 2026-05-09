@@ -11,6 +11,16 @@ pub enum TlsBackend {
     NativeTls,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceEndpointFamily {
+    /// Legacy Amazon Q Developer host family: q.<region>.amazonaws.com
+    #[default]
+    Legacy,
+    /// Current Kiro host family: runtime.<region>.kiro.dev / management.<region>.kiro.dev
+    Kiro,
+}
+
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +111,13 @@ pub struct Config {
     /// 默认端点名称（凭据未显式指定 endpoint 时使用）
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
+
+    /// Kiro 服务端点域名族
+    ///
+    /// - `legacy`: q.<region>.amazonaws.com
+    /// - `kiro`: runtime.<region>.kiro.dev / management.<region>.kiro.dev
+    #[serde(default)]
+    pub service_endpoint_family: ServiceEndpointFamily,
 
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
@@ -307,6 +324,7 @@ impl Default for Config {
             prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),
             prompt_cache_accounting_enabled: default_true(),
             default_endpoint: default_endpoint(),
+            service_endpoint_family: ServiceEndpointFamily::default(),
             config_path: None,
         }
     }
@@ -378,5 +396,21 @@ mod tests {
         let config: Config = serde_json::from_str(r#"{"promptCacheAccountingEnabled":false}"#)
             .expect("config should deserialize");
         assert!(!config.prompt_cache_accounting_enabled);
+    }
+
+    #[test]
+    fn test_config_service_endpoint_family_defaults_to_legacy() {
+        let config: Config = serde_json::from_str(r#"{}"#).expect("config should deserialize");
+        assert_eq!(
+            config.service_endpoint_family,
+            ServiceEndpointFamily::Legacy
+        );
+    }
+
+    #[test]
+    fn test_config_deserializes_kiro_service_endpoint_family() {
+        let config: Config = serde_json::from_str(r#"{"serviceEndpointFamily":"kiro"}"#)
+            .expect("config should deserialize");
+        assert_eq!(config.service_endpoint_family, ServiceEndpointFamily::Kiro);
     }
 }

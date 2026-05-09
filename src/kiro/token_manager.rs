@@ -977,6 +977,14 @@ impl MultiTokenManager {
         self.config.write().default_endpoint = default_endpoint;
     }
 
+    /// 热更新 Kiro 服务端点域名族
+    pub fn update_service_endpoint_family(
+        &self,
+        family: crate::model::config::ServiceEndpointFamily,
+    ) {
+        self.config.write().service_endpoint_family = family;
+    }
+
     /// 热更新单凭据目标请求速率（RPM）
     pub fn update_credential_rpm(&self, rpm: Option<u32>) {
         // 更新 config 中的 credential_rpm
@@ -3727,6 +3735,28 @@ mod tests {
         assert!(user_agent.contains("os/win32#10.0.22631"));
         assert!(user_agent.contains("md/nodejs#22.22.0"));
         assert!(user_agent.contains("KiroIDE-0.11.107-machine123"));
+    }
+
+    #[test]
+    fn test_usage_limit_kiro_family_uses_management_host() {
+        let mut config = Config::default();
+        config.service_endpoint_family = crate::model::config::ServiceEndpointFamily::Kiro;
+        config.region = "eu-central-1".to_string();
+        let credentials = KiroCredentials::default();
+        let endpoint = IdeEndpoint::new();
+        let ctx = RequestContext {
+            credentials: &credentials,
+            token: "test_token",
+            machine_id: "machine123",
+            config: &config,
+        };
+
+        let usage = endpoint.usage_request_parts(&ctx).unwrap();
+        assert!(
+            usage
+                .url
+                .starts_with("https://management.eu-central-1.kiro.dev/")
+        );
     }
 
     #[test]
