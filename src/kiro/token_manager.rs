@@ -617,6 +617,56 @@ pub struct CredentialEntrySnapshot {
     pub api_region: Option<String>,
     /// 最终生效的 endpoint 名称
     pub endpoint: Option<String>,
+    /// 凭据健康状态（只读诊断视图）
+    pub health: CredentialHealth,
+}
+
+/// 凭据健康状态
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialHealth {
+    pub status: CredentialHealthStatus,
+    pub reason: String,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
+}
+
+/// 凭据健康状态枚举
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialHealthStatus {
+    Healthy,
+    CoolingDown,
+    RateLimited,
+    TokenRefreshFailed,
+    AuthenticationFailed,
+    AccountSuspended,
+    QuotaExceeded,
+    ModelUnavailable,
+    InsufficientBalance,
+    DisabledManual,
+    FailureLimited,
+    UnknownFailure,
+}
+
+impl CredentialHealth {
+    fn new(
+        status: CredentialHealthStatus,
+        reason: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+        retry_after_secs: Option<u64>,
+    ) -> Self {
+        Self {
+            status,
+            reason: reason.into(),
+            message: message.into(),
+            retryable,
+            retry_after_secs,
+        }
+    }
 }
 
 /// 凭据管理器状态快照
@@ -2436,12 +2486,166 @@ impl MultiTokenManager {
                         region: e.credentials.region.clone(),
                         api_region: e.credentials.api_region.clone(),
                         endpoint: e.credentials.endpoint.clone(),
+                        health: self.credential_health(e),
                     }
                 })
                 .collect(),
             total: entries.len(),
             available,
         }
+    }
+
+    fn credential_health(&self, entry: &CredentialEntry) -> CredentialHealth {
+        if entry.disabled {
+            return match entry.disable_reason {
+                Some(DisableReason::Manual) => CredentialHealth::new(
+                    CredentialHealthStatus::DisabledManual,
+                    "manual_disabled",
+                    "手动禁用",
+                    false,
+                    None,
+                ),
+                Some(DisableReason::AuthenticationFailed) => CredentialHealth::new(
+                    CredentialHealthStatus::AuthenticationFailed,
+                    "authentication_failed",
+                    "认证失败，需要重新导入或刷新凭据",
+                    false,
+                    None,
+                ),
+                Some(DisableReason::AccountSuspended) => CredentialHealth::new(
+                    CredentialHealthStatus::AccountSuspended,
+                    "account_suspended",
+                    "账号被暂停，需手动处理",
+                    false,
+                    None,
+                ),
+                Some(DisableReason::QuotaExceeded) => CredentialHealth::new(
+                    CredentialHealthStatus::QuotaExceeded,
+                    "quota_exceeded",
+                    "额度已用尽",
+                    false,
+                    None,
+                ),
+                Some(DisableReason::InsufficientBalance) => CredentialHealth::new(
+                    CredentialHealthStatus::InsufficientBalance,
+                    "insufficient_balance",
+                    "余额不足",
+                    false,
+                    None,
+                ),
+                Some(DisableReason::ModelUnavailable) => CredentialHealth::new(
+                    CredentialHealthStatus::ModelUnavailable,
+                    "model_unavailable",
+                    "模型暂时不可用，等待自动恢复",
+                    true,
+                    None,
+                ),
+                Some(DisableReason::RefreshFailureLimit) => CredentialHealth::new(
+                    CredentialHealthStatus::TokenRefreshFailed,
+                    "refresh_failure_limit",
+                    "Token 刷新连续失败，已禁用",
+                    true,
+                    None,
+                ),
+                Some(DisableReason::FailureLimit) => CredentialHealth::new(
+                    CredentialHealthStatus::FailureLimited,
+                    "failure_limit",
+                    "API 连续失败次数过多，已禁用",
+                    true,
+                    None,
+                ),
+                None => CredentialHealth::new(
+                    CredentialHealthStatus::UnknownFailure,
+                    "disabled_unknown",
+                    "凭据已禁用，原因未知",
+                    false,
+                    None,
+                ),
+            };
+        }
+
+        if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(entry.id) {
+            let retry_after_secs = Some((remaining.as_millis().div_ceil(1000) as u64).max(1));
+            return match reason {
+                CooldownReason::RateLimitExceeded => CredentialHealth::new(
+                    CredentialHealthStatus::RateLimited,
+                    "rate_limited",
+                    "速率限制冷却中",
+                    true,
+                    retry_after_secs,
+                ),
+                CooldownReason::TokenRefreshFailed => CredentialHealth::new(
+                    CredentialHealthStatus::TokenRefreshFailed,
+                    "token_refresh_failed",
+                    "Token 刷新失败冷却中",
+                    true,
+                    retry_after_secs,
+                ),
+                CooldownReason::AuthenticationFailed => CredentialHealth::new(
+                    CredentialHealthStatus::AuthenticationFailed,
+                    "authentication_failed",
+                    "认证失败冷却中",
+                    false,
+                    retry_after_secs,
+                ),
+                CooldownReason::AccountSuspended => CredentialHealth::new(
+                    CredentialHealthStatus::AccountSuspended,
+                    "account_suspended",
+                    "账号暂停冷却中",
+                    false,
+                    retry_after_secs,
+                ),
+                CooldownReason::QuotaExhausted => CredentialHealth::new(
+                    CredentialHealthStatus::QuotaExceeded,
+                    "quota_exhausted",
+                    "配额耗尽冷却中",
+                    false,
+                    retry_after_secs,
+                ),
+                CooldownReason::ModelUnavailable => CredentialHealth::new(
+                    CredentialHealthStatus::ModelUnavailable,
+                    "model_unavailable",
+                    "模型暂时不可用冷却中",
+                    true,
+                    retry_after_secs,
+                ),
+                CooldownReason::ServerError => CredentialHealth::new(
+                    CredentialHealthStatus::CoolingDown,
+                    "server_error",
+                    "上游错误冷却中",
+                    true,
+                    retry_after_secs,
+                ),
+            };
+        }
+
+        if entry.refresh_failure_count > 0 {
+            return CredentialHealth::new(
+                CredentialHealthStatus::TokenRefreshFailed,
+                "token_refresh_failed",
+                "最近发生 Token 刷新失败",
+                true,
+                None,
+            );
+        }
+
+        if entry.failure_count > 0 {
+            return CredentialHealth::new(
+                CredentialHealthStatus::UnknownFailure,
+                "recent_api_failures",
+                "最近发生 API 调用失败",
+                true,
+                None,
+            );
+        }
+
+        CredentialHealth::new(
+            CredentialHealthStatus::Healthy,
+            "healthy",
+            "正常",
+            true,
+            None,
+        )
     }
 
     /// 设置凭据禁用状态（Admin API）
@@ -3480,6 +3684,61 @@ mod tests {
         assert_eq!(reason, CooldownReason::RateLimitExceeded);
         assert!(remaining <= std::time::Duration::from_secs(120));
         assert!(remaining > std::time::Duration::from_secs(100));
+    }
+
+    #[test]
+    fn test_snapshot_health_reports_healthy_credential() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        let snapshot = manager.snapshot();
+        assert_eq!(
+            snapshot.entries[0].health.status,
+            CredentialHealthStatus::Healthy
+        );
+        assert_eq!(snapshot.entries[0].health.reason, "healthy");
+    }
+
+    #[test]
+    fn test_snapshot_health_reports_rate_limit_cooldown() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        manager.set_credential_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_secs(120)),
+        );
+
+        let snapshot = manager.snapshot();
+        assert_eq!(
+            snapshot.entries[0].health.status,
+            CredentialHealthStatus::RateLimited
+        );
+        let retry_after_secs = snapshot.entries[0].health.retry_after_secs.unwrap();
+        assert!(retry_after_secs <= 120);
+        assert!(retry_after_secs > 100);
+    }
+
+    #[test]
+    fn test_snapshot_health_reports_quota_disabled() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        assert!(!manager.report_quota_exhausted(1));
+
+        let snapshot = manager.snapshot();
+        assert_eq!(
+            snapshot.entries[0].health.status,
+            CredentialHealthStatus::QuotaExceeded
+        );
+        assert!(!snapshot.entries[0].health.retryable);
     }
 
     #[tokio::test]

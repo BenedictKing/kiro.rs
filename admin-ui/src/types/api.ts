@@ -6,6 +6,28 @@ export interface CredentialsStatusResponse {
 }
 
 // 单个凭据状态
+export type CredentialHealthStatus =
+  | 'healthy'
+  | 'cooling_down'
+  | 'rate_limited'
+  | 'token_refresh_failed'
+  | 'authentication_failed'
+  | 'account_suspended'
+  | 'quota_exceeded'
+  | 'model_unavailable'
+  | 'insufficient_balance'
+  | 'disabled_manual'
+  | 'failure_limited'
+  | 'unknown_failure'
+
+export interface CredentialHealth {
+  status: CredentialHealthStatus
+  reason: string
+  message: string
+  retryable: boolean
+  retryAfterSecs?: number
+}
+
 export interface CredentialStatusItem {
   id: number
   priority: number
@@ -45,6 +67,8 @@ export interface CredentialStatusItem {
   endpoint?: string | null
   /** 最终生效的 endpoint */
   effectiveEndpoint: string
+  /** 凭据健康状态（只读诊断视图） */
+  health: CredentialHealth
 }
 
 // 余额响应

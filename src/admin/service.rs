@@ -112,6 +112,7 @@ impl AdminService {
                     api_region: entry.api_region,
                     endpoint,
                     effective_endpoint,
+                    health: entry.health,
                 }
             })
             .collect();

@@ -52,6 +52,70 @@ function formatLastUsed(lastUsedAt: string | null): string {
   return `${days} 天前`
 }
 
+type HealthBadgeVariant = 'success' | 'warning' | 'destructive' | 'secondary' | 'outline'
+
+function healthBadgeVariant(status: CredentialStatusItem['health']['status']): HealthBadgeVariant {
+  switch (status) {
+    case 'healthy':
+      return 'success'
+    case 'cooling_down':
+    case 'rate_limited':
+    case 'token_refresh_failed':
+    case 'model_unavailable':
+    case 'unknown_failure':
+      return 'warning'
+    case 'authentication_failed':
+    case 'account_suspended':
+    case 'quota_exceeded':
+    case 'insufficient_balance':
+    case 'failure_limited':
+      return 'destructive'
+    case 'disabled_manual':
+      return 'secondary'
+    default:
+      return 'outline'
+  }
+}
+
+function healthBadgeLabel(status: CredentialStatusItem['health']['status']): string {
+  switch (status) {
+    case 'healthy':
+      return '正常'
+    case 'cooling_down':
+      return '冷却中'
+    case 'rate_limited':
+      return '限速'
+    case 'token_refresh_failed':
+      return '刷新异常'
+    case 'authentication_failed':
+      return '认证失败'
+    case 'account_suspended':
+      return '账号暂停'
+    case 'quota_exceeded':
+      return '配额耗尽'
+    case 'model_unavailable':
+      return '模型不可用'
+    case 'insufficient_balance':
+      return '余额不足'
+    case 'disabled_manual':
+      return '手动禁用'
+    case 'failure_limited':
+      return '失败过多'
+    case 'unknown_failure':
+      return '异常'
+    default:
+      return '未知'
+  }
+}
+
+function formatRetryAfter(seconds?: number): string | null {
+  if (!seconds) return null
+  if (seconds < 60) return `约 ${seconds} 秒后`
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `约 ${minutes} 分钟后`
+  return `约 ${Math.ceil(minutes / 60)} 小时后`
+}
+
 export function CredentialCard({
   credential,
   cachedBalance,
@@ -228,6 +292,9 @@ export function CredentialCard({
                 {credential.disabled && (
                   <Badge variant="destructive">已禁用</Badge>
                 )}
+                <Badge variant={healthBadgeVariant(credential.health.status)}>
+                  {healthBadgeLabel(credential.health.status)}
+                </Badge>
               </CardTitle>
             </div>
             <div className="flex items-center gap-2">
@@ -318,6 +385,15 @@ export function CredentialCard({
                 <span className="font-medium">{credential.disabledReason}</span>
               </div>
             )}
+            <div className="col-span-2">
+              <span className="text-muted-foreground">健康状态：</span>
+              <span className="font-medium">{credential.health.message}</span>
+              {formatRetryAfter(credential.health.retryAfterSecs) && (
+                <span className="text-xs text-muted-foreground ml-2">
+                  {formatRetryAfter(credential.health.retryAfterSecs)}
+                </span>
+              )}
+            </div>
             <div className="col-span-2">
               <span className="text-muted-foreground">余额：</span>
               {loadingBalance ? (

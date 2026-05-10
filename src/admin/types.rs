@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::kiro::token_manager::CredentialHealth;
 use crate::model::config::ServiceEndpointFamily;
 
 // ============ 凭据状态 ============
@@ -58,6 +59,8 @@ pub struct CredentialStatusItem {
     pub endpoint: Option<String>,
     /// 最终生效的 endpoint 名称
     pub effective_endpoint: String,
+    /// 凭据健康状态（只读诊断视图）
+    pub health: CredentialHealth,
 }
 
 // ============ 操作请求 ============
