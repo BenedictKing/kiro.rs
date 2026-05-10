@@ -116,6 +116,45 @@ function formatRetryAfter(seconds?: number): string | null {
   return `约 ${Math.ceil(minutes / 60)} 小时后`
 }
 
+function eventKindLabel(kind: NonNullable<CredentialStatusItem['stateEvents']>[number]['kind']): string {
+  switch (kind) {
+    case 'api_success':
+      return '调用成功'
+    case 'api_failure':
+      return '调用失败'
+    case 'token_refresh_success':
+      return '刷新成功'
+    case 'token_refresh_failure':
+      return '刷新失败'
+    case 'auto_recover':
+      return '自动恢复'
+    case 'manual_disable':
+      return '手动禁用'
+    case 'manual_enable':
+      return '手动启用'
+    case 'reset_and_enable':
+      return '重置启用'
+    case 'quota_exceeded':
+      return '配额耗尽'
+    case 'model_unavailable':
+      return '模型不可用'
+    case 'authentication_failed':
+      return '认证失败'
+    case 'account_suspended':
+      return '账号暂停'
+    case 'insufficient_balance':
+      return '余额不足'
+    case 'rate_limited':
+      return '限速'
+    case 'cooldown':
+      return '冷却'
+    case 'upstream_error':
+      return '上游错误'
+    default:
+      return '事件'
+  }
+}
+
 export function CredentialCard({
   credential,
   cachedBalance,
@@ -276,6 +315,7 @@ export function CredentialCard({
     onViewBalance(credential.id, isCacheStale())
   }
 
+  const recentEvents = (credential.stateEvents ?? []).slice(-3).reverse()
 
   return (
     <>
@@ -394,6 +434,28 @@ export function CredentialCard({
                 </span>
               )}
             </div>
+            {credential.lastErrorSummary && (
+              <div className="col-span-2">
+                <span className="text-muted-foreground">最近错误：</span>
+                <span className="font-medium break-all">{credential.lastErrorSummary}</span>
+              </div>
+            )}
+            {recentEvents.length > 0 && (
+              <div className="col-span-2 space-y-1">
+                <span className="text-muted-foreground">最近事件：</span>
+                <div className="space-y-1">
+                  {recentEvents.map((event) => (
+                    <div key={`${event.at}-${event.kind}`} className="text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">{eventKindLabel(event.kind)}</span>
+                      <span className="ml-2">{formatLastUsed(event.at)}</span>
+                      {event.message && (
+                        <span className="ml-2 break-all">{event.message}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="col-span-2">
               <span className="text-muted-foreground">余额：</span>
               {loadingBalance ? (

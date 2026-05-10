@@ -554,6 +554,10 @@ struct CredentialEntry {
     last_used_at: Option<String>,
     /// refreshToken 的 SHA-256 哈希缓存（避免 snapshot 重复计算）
     refresh_token_hash: Option<String>,
+    /// 最近一次错误摘要
+    last_error_summary: Option<String>,
+    /// 最近状态事件
+    state_events: Vec<CredentialStateEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,8 +575,51 @@ enum CredentialStateTransition {
     DisableTerminal(DisableReason),
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStateEventKind {
+    ApiSuccess,
+    ApiFailure,
+    TokenRefreshSuccess,
+    TokenRefreshFailure,
+    AutoRecover,
+    ManualDisable,
+    ManualEnable,
+    ResetAndEnable,
+    QuotaExceeded,
+    ModelUnavailable,
+    AuthenticationFailed,
+    AccountSuspended,
+    InsufficientBalance,
+    RateLimited,
+    Cooldown,
+    UpstreamError,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStateEvent {
+    pub at: String,
+    pub kind: CredentialStateEventKind,
+    pub previous_status: CredentialHealthStatus,
+    pub new_status: CredentialHealthStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 impl CredentialEntry {
     fn transition(&mut self, transition: CredentialStateTransition) {
+        self.transition_with_message(transition, None);
+    }
+
+    fn transition_with_message(
+        &mut self,
+        transition: CredentialStateTransition,
+        message: Option<&str>,
+    ) {
+        let previous_status = self.stored_health_status();
+        let event_kind = transition.event_kind();
+
         match transition {
             CredentialStateTransition::ApiSuccess => {
                 self.failure_count = 0;
@@ -635,22 +682,218 @@ impl CredentialEntry {
                 self.disable_reason = Some(reason);
             }
         }
+
+        let new_status = self.stored_health_status();
+        self.append_state_event_if_relevant(event_kind, previous_status, new_status, message);
     }
 
-    fn record_api_failure(&mut self) -> u32 {
+    fn record_api_failure(&mut self, message: Option<&str>) -> u32 {
         self.failure_count += 1;
         if self.failure_count >= MAX_FAILURES_PER_CREDENTIAL {
-            self.transition(CredentialStateTransition::DisableForFailureLimit);
+            self.transition_with_message(
+                CredentialStateTransition::DisableForFailureLimit,
+                message,
+            );
+        } else {
+            self.append_state_event(
+                CredentialStateEventKind::ApiFailure,
+                self.stored_health_status(),
+                message,
+            );
         }
         self.failure_count
     }
 
-    fn record_refresh_failure(&mut self) -> u32 {
+    fn record_refresh_failure(&mut self, message: Option<&str>) -> u32 {
         self.refresh_failure_count += 1;
         if self.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
-            self.transition(CredentialStateTransition::DisableForRefreshFailureLimit);
+            self.transition_with_message(
+                CredentialStateTransition::DisableForRefreshFailureLimit,
+                message,
+            );
+        } else {
+            self.append_state_event(
+                CredentialStateEventKind::TokenRefreshFailure,
+                self.stored_health_status(),
+                message,
+            );
         }
         self.refresh_failure_count
+    }
+
+    fn record_external_error(&mut self, message: Option<&str>) {
+        self.append_state_event(
+            CredentialStateEventKind::UpstreamError,
+            self.stored_health_status(),
+            message,
+        );
+    }
+
+    fn record_cooldown(&mut self, status: CredentialHealthStatus, message: Option<&str>) {
+        let kind = if status == CredentialHealthStatus::RateLimited {
+            CredentialStateEventKind::RateLimited
+        } else {
+            CredentialStateEventKind::Cooldown
+        };
+        self.append_state_event(kind, status, message);
+    }
+
+    fn append_state_event_if_relevant(
+        &mut self,
+        kind: CredentialStateEventKind,
+        previous_status: CredentialHealthStatus,
+        new_status: CredentialHealthStatus,
+        message: Option<&str>,
+    ) {
+        if previous_status != new_status || message.is_some() || kind.is_operator_action() {
+            self.append_state_event_with_previous(kind, previous_status, new_status, message);
+        }
+    }
+
+    fn append_state_event(
+        &mut self,
+        kind: CredentialStateEventKind,
+        new_status: CredentialHealthStatus,
+        message: Option<&str>,
+    ) {
+        let previous_status = self.stored_health_status();
+        self.append_state_event_with_previous(kind, previous_status, new_status, message);
+    }
+
+    fn append_state_event_with_previous(
+        &mut self,
+        kind: CredentialStateEventKind,
+        previous_status: CredentialHealthStatus,
+        new_status: CredentialHealthStatus,
+        message: Option<&str>,
+    ) {
+        let message = message.map(truncate_event_message);
+        if kind.is_error() {
+            self.last_error_summary = message.clone();
+        }
+
+        self.state_events.push(CredentialStateEvent {
+            at: Utc::now().to_rfc3339(),
+            kind,
+            previous_status,
+            new_status,
+            message,
+        });
+
+        if self.state_events.len() > MAX_CREDENTIAL_STATE_EVENTS {
+            let drain_len = self.state_events.len() - MAX_CREDENTIAL_STATE_EVENTS;
+            self.state_events.drain(0..drain_len);
+        }
+    }
+
+    fn stored_health_status(&self) -> CredentialHealthStatus {
+        if self.disabled {
+            return match self.disable_reason {
+                Some(DisableReason::Manual) => CredentialHealthStatus::DisabledManual,
+                Some(DisableReason::AuthenticationFailed) => {
+                    CredentialHealthStatus::AuthenticationFailed
+                }
+                Some(DisableReason::AccountSuspended) => CredentialHealthStatus::AccountSuspended,
+                Some(DisableReason::QuotaExceeded) => CredentialHealthStatus::QuotaExceeded,
+                Some(DisableReason::InsufficientBalance) => {
+                    CredentialHealthStatus::InsufficientBalance
+                }
+                Some(DisableReason::ModelUnavailable) => CredentialHealthStatus::ModelUnavailable,
+                Some(DisableReason::RefreshFailureLimit) => {
+                    CredentialHealthStatus::TokenRefreshFailed
+                }
+                Some(DisableReason::FailureLimit) => CredentialHealthStatus::FailureLimited,
+                None => CredentialHealthStatus::UnknownFailure,
+            };
+        }
+
+        if self.refresh_failure_count > 0 {
+            return CredentialHealthStatus::TokenRefreshFailed;
+        }
+
+        if self.failure_count > 0 {
+            return CredentialHealthStatus::UnknownFailure;
+        }
+
+        CredentialHealthStatus::Healthy
+    }
+}
+
+impl CredentialStateTransition {
+    fn event_kind(self) -> CredentialStateEventKind {
+        match self {
+            CredentialStateTransition::ApiSuccess => CredentialStateEventKind::ApiSuccess,
+            CredentialStateTransition::TokenRefreshSuccess => {
+                CredentialStateEventKind::TokenRefreshSuccess
+            }
+            CredentialStateTransition::AutoRecover => CredentialStateEventKind::AutoRecover,
+            CredentialStateTransition::ManualDisable => CredentialStateEventKind::ManualDisable,
+            CredentialStateTransition::ManualEnable => CredentialStateEventKind::ManualEnable,
+            CredentialStateTransition::ResetAndEnable => CredentialStateEventKind::ResetAndEnable,
+            CredentialStateTransition::DisableForFailureLimit => {
+                CredentialStateEventKind::ApiFailure
+            }
+            CredentialStateTransition::DisableForRefreshFailureLimit => {
+                CredentialStateEventKind::TokenRefreshFailure
+            }
+            CredentialStateTransition::DisableForQuotaExceeded => {
+                CredentialStateEventKind::QuotaExceeded
+            }
+            CredentialStateTransition::DisableForModelUnavailable => {
+                CredentialStateEventKind::ModelUnavailable
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::AuthenticationFailed) => {
+                CredentialStateEventKind::AuthenticationFailed
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::AccountSuspended) => {
+                CredentialStateEventKind::AccountSuspended
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::InsufficientBalance) => {
+                CredentialStateEventKind::InsufficientBalance
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::QuotaExceeded) => {
+                CredentialStateEventKind::QuotaExceeded
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::ModelUnavailable) => {
+                CredentialStateEventKind::ModelUnavailable
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::Manual) => {
+                CredentialStateEventKind::ManualDisable
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::FailureLimit) => {
+                CredentialStateEventKind::ApiFailure
+            }
+            CredentialStateTransition::DisableTerminal(DisableReason::RefreshFailureLimit) => {
+                CredentialStateEventKind::TokenRefreshFailure
+            }
+        }
+    }
+}
+
+impl CredentialStateEventKind {
+    fn is_error(self) -> bool {
+        matches!(
+            self,
+            CredentialStateEventKind::ApiFailure
+                | CredentialStateEventKind::TokenRefreshFailure
+                | CredentialStateEventKind::QuotaExceeded
+                | CredentialStateEventKind::ModelUnavailable
+                | CredentialStateEventKind::AuthenticationFailed
+                | CredentialStateEventKind::AccountSuspended
+                | CredentialStateEventKind::InsufficientBalance
+                | CredentialStateEventKind::RateLimited
+                | CredentialStateEventKind::Cooldown
+                | CredentialStateEventKind::UpstreamError
+        )
+    }
+
+    fn is_operator_action(self) -> bool {
+        matches!(
+            self,
+            CredentialStateEventKind::ManualDisable
+                | CredentialStateEventKind::ManualEnable
+                | CredentialStateEventKind::ResetAndEnable
+        )
     }
 }
 
@@ -671,6 +914,10 @@ enum AutoHealReason {
 struct StatsEntry {
     success_count: u64,
     last_used_at: Option<String>,
+    #[serde(default)]
+    last_error_summary: Option<String>,
+    #[serde(default)]
+    state_events: Vec<CredentialStateEvent>,
 }
 
 // ============================================================================
@@ -717,6 +964,10 @@ pub struct CredentialEntrySnapshot {
     pub endpoint: Option<String>,
     /// 凭据健康状态（只读诊断视图）
     pub health: CredentialHealth,
+    /// 最近一次错误摘要
+    pub last_error_summary: Option<String>,
+    /// 最近状态事件
+    pub state_events: Vec<CredentialStateEvent>,
 }
 
 /// 凭据健康状态
@@ -732,7 +983,7 @@ pub struct CredentialHealth {
 }
 
 /// 凭据健康状态枚举
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialHealthStatus {
     Healthy,
@@ -893,6 +1144,8 @@ struct RateLimitedCredentialDiag {
 
 /// 每个凭据最大 API 调用失败次数
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
+const MAX_CREDENTIAL_STATE_EVENTS: usize = 20;
+const MAX_CREDENTIAL_EVENT_MESSAGE_CHARS: usize = 500;
 
 /// MODEL_TEMPORARILY_UNAVAILABLE 触发全局禁用的阈值
 const MODEL_UNAVAILABLE_THRESHOLD: u32 = 2;
@@ -907,6 +1160,30 @@ const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);
 /// 继续短睡重试（平滑瞬时抖动）；超过则立即 bail，由上层返回 429 + Retry-After，
 /// 避免 HTTP handler 挂到客户端超时。
 const ALL_CREDENTIALS_COOLDOWN_BAIL_THRESHOLD: StdDuration = StdDuration::from_secs(2);
+
+fn truncate_event_message(message: &str) -> String {
+    let trimmed = message.trim();
+    let mut result = String::new();
+    for ch in trimmed.chars().take(MAX_CREDENTIAL_EVENT_MESSAGE_CHARS) {
+        result.push(ch);
+    }
+    if trimmed.chars().count() > MAX_CREDENTIAL_EVENT_MESSAGE_CHARS {
+        result.push_str("...");
+    }
+    result
+}
+
+fn cooldown_health_status(reason: CooldownReason) -> CredentialHealthStatus {
+    match reason {
+        CooldownReason::RateLimitExceeded => CredentialHealthStatus::RateLimited,
+        CooldownReason::TokenRefreshFailed => CredentialHealthStatus::TokenRefreshFailed,
+        CooldownReason::AuthenticationFailed => CredentialHealthStatus::AuthenticationFailed,
+        CooldownReason::AccountSuspended => CredentialHealthStatus::AccountSuspended,
+        CooldownReason::QuotaExhausted => CredentialHealthStatus::QuotaExceeded,
+        CooldownReason::ModelUnavailable => CredentialHealthStatus::ModelUnavailable,
+        CooldownReason::ServerError => CredentialHealthStatus::CoolingDown,
+    }
+}
 
 /// API 调用上下文
 ///
@@ -1037,6 +1314,8 @@ impl MultiTokenManager {
                     success_count: 0,
                     last_used_at: None,
                     refresh_token_hash,
+                    last_error_summary: None,
+                    state_events: Vec::new(),
                 }
             })
             .collect();
@@ -1935,7 +2214,7 @@ impl MultiTokenManager {
                                 let has_available = {
                                     let mut entries = self.entries.lock();
                                     if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                                        entry.record_refresh_failure();
+                                        entry.record_refresh_failure(Some(&err.to_string()));
                                     }
                                     entries.iter().any(|e| !e.disabled && e.id != id)
                                 };
@@ -2138,6 +2417,8 @@ impl MultiTokenManager {
             if let Some(s) = stats.get(&entry.id.to_string()) {
                 entry.success_count = s.success_count;
                 entry.last_used_at = s.last_used_at.clone();
+                entry.last_error_summary = s.last_error_summary.clone();
+                entry.state_events = s.state_events.clone();
             }
         }
         *self.last_stats_save_at.lock() = Some(Instant::now());
@@ -2162,6 +2443,8 @@ impl MultiTokenManager {
                         StatsEntry {
                             success_count: e.success_count,
                             last_used_at: e.last_used_at.clone(),
+                            last_error_summary: e.last_error_summary.clone(),
+                            state_events: e.state_events.clone(),
                         },
                     )
                 })
@@ -2243,6 +2526,10 @@ impl MultiTokenManager {
     /// # Arguments
     /// * `id` - 凭据 ID（来自 CallContext）
     pub fn report_failure(&self, id: u64) -> bool {
+        self.report_failure_with_error(id, None)
+    }
+
+    pub fn report_failure_with_error(&self, id: u64, error_message: Option<&str>) -> bool {
         let result = {
             let mut entries = self.entries.lock();
 
@@ -2251,7 +2538,7 @@ impl MultiTokenManager {
                 None => return entries.iter().any(|e| !e.disabled),
             };
 
-            let failure_count = entry.record_api_failure();
+            let failure_count = entry.record_api_failure(error_message);
             entry.last_used_at = Some(Utc::now().to_rfc3339());
 
             tracing::warn!(
@@ -2286,6 +2573,10 @@ impl MultiTokenManager {
     /// - 切换到下一个可用凭据继续重试
     /// - 返回是否还有可用凭据
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
+        self.report_quota_exhausted_with_error(id, None)
+    }
+
+    pub fn report_quota_exhausted_with_error(&self, id: u64, error_message: Option<&str>) -> bool {
         let result = {
             let mut entries = self.entries.lock();
 
@@ -2298,7 +2589,10 @@ impl MultiTokenManager {
                 return entries.iter().any(|e| !e.disabled);
             }
 
-            entry.transition(CredentialStateTransition::DisableForQuotaExceeded);
+            entry.transition_with_message(
+                CredentialStateTransition::DisableForQuotaExceeded,
+                error_message,
+            );
             entry.last_used_at = Some(Utc::now().to_rfc3339());
 
             tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用", id);
@@ -2563,6 +2857,8 @@ impl MultiTokenManager {
                         api_region: e.credentials.api_region.clone(),
                         endpoint: e.credentials.endpoint.clone(),
                         health: self.credential_health(e),
+                        last_error_summary: e.last_error_summary.clone(),
+                        state_events: e.state_events.clone(),
                     }
                 })
                 .collect(),
@@ -3063,6 +3359,8 @@ impl MultiTokenManager {
                 success_count: 0,
                 last_used_at: None,
                 refresh_token_hash: entry_secret_hash,
+                last_error_summary: None,
+                state_events: Vec::new(),
             });
         }
 
@@ -3191,7 +3489,7 @@ impl MultiTokenManager {
     /// 设置凭据冷却（带原因分类）
     #[allow(dead_code)]
     pub fn set_credential_cooldown(&self, id: u64, reason: CooldownReason) -> std::time::Duration {
-        self.cooldown_manager.set_cooldown(id, reason)
+        self.set_credential_cooldown_with_duration_and_message(id, reason, None, None)
     }
 
     /// 设置凭据冷却（支持自定义时长）
@@ -3202,10 +3500,21 @@ impl MultiTokenManager {
         reason: CooldownReason,
         duration: Option<std::time::Duration>,
     ) -> std::time::Duration {
+        self.set_credential_cooldown_with_duration_and_message(id, reason, duration, None)
+    }
+
+    pub fn set_credential_cooldown_with_duration_and_message(
+        &self,
+        id: u64,
+        reason: CooldownReason,
+        duration: Option<std::time::Duration>,
+        message: Option<&str>,
+    ) -> std::time::Duration {
         {
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
+                entry.record_cooldown(cooldown_health_status(reason), message);
             }
         }
         self.save_stats_debounced();
@@ -3345,13 +3654,25 @@ impl MultiTokenManager {
     /// 记录 API 调用失败（更新速率限制器和冷却管理器）
     #[allow(dead_code)]
     pub fn record_api_failure(&self, id: u64, error_message: Option<&str>) -> bool {
-        let has_available = self.report_failure(id);
+        let has_available = self.report_failure_with_error(id, error_message);
 
         // 更新速率限制器
         let backoff = self.rate_limiter.record_failure(id, error_message);
         tracing::debug!("凭据 #{} 退避时间: {:?}", id, backoff);
 
         has_available
+    }
+
+    /// 记录不改变调度状态的上游错误摘要
+    pub fn record_credential_error(&self, id: u64, error_message: impl AsRef<str>) {
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.record_external_error(Some(error_message.as_ref()));
+                entry.last_used_at = Some(Utc::now().to_rfc3339());
+            }
+        }
+        self.save_stats_debounced();
     }
 
     /// 清理过期的冷却状态
@@ -3464,6 +3785,8 @@ mod tests {
             success_count: 0,
             last_used_at: None,
             refresh_token_hash: None,
+            last_error_summary: None,
+            state_events: Vec::new(),
         }
     }
 
@@ -3472,7 +3795,7 @@ mod tests {
         let mut entry = test_credential_entry();
 
         for expected in 1..=MAX_FAILURES_PER_CREDENTIAL {
-            assert_eq!(entry.record_api_failure(), expected);
+            assert_eq!(entry.record_api_failure(Some("upstream failed")), expected);
         }
 
         assert!(entry.disabled);
@@ -3481,6 +3804,11 @@ mod tests {
             Some(AutoHealReason::TooManyFailures)
         );
         assert_eq!(entry.disable_reason, Some(DisableReason::FailureLimit));
+        assert_eq!(entry.last_error_summary.as_deref(), Some("upstream failed"));
+        assert_eq!(
+            entry.state_events.len(),
+            MAX_FAILURES_PER_CREDENTIAL as usize
+        );
     }
 
     #[test]
@@ -3495,6 +3823,7 @@ mod tests {
         assert!(entry.disabled);
         assert_eq!(entry.auto_heal_reason, None);
         assert_eq!(entry.disable_reason, Some(DisableReason::AccountSuspended));
+        assert_eq!(entry.last_error_summary, None);
     }
 
     #[tokio::test]
@@ -3834,6 +4163,27 @@ mod tests {
         let retry_after_secs = snapshot.entries[0].health.retry_after_secs.unwrap();
         assert!(retry_after_secs <= 120);
         assert!(retry_after_secs > 100);
+    }
+
+    #[test]
+    fn test_snapshot_includes_recent_error_summary_and_state_events() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        assert!(manager.report_failure_with_error(1, Some("upstream 503")));
+
+        let snapshot = manager.snapshot();
+        assert_eq!(
+            snapshot.entries[0].last_error_summary.as_deref(),
+            Some("upstream 503")
+        );
+        assert_eq!(snapshot.entries[0].state_events.len(), 1);
+        assert_eq!(
+            snapshot.entries[0].state_events[0].kind,
+            CredentialStateEventKind::ApiFailure
+        );
     }
 
     #[test]

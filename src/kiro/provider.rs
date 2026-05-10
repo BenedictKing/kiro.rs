@@ -465,7 +465,14 @@ impl KiroProvider {
 
             // 402 额度用尽
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
-                let has_available = self.token_manager.report_quota_exhausted(ctx.id);
+                let error_summary = format!(
+                    "MCP 请求失败: {} {}",
+                    status,
+                    Self::summarize_error_body(&body)
+                );
+                let has_available = self
+                    .token_manager
+                    .report_quota_exhausted_with_error(ctx.id, Some(&error_summary));
                 if !has_available {
                     anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
                 }
@@ -543,7 +550,14 @@ impl KiroProvider {
                     continue;
                 }
 
-                let has_available = self.token_manager.report_failure(ctx.id);
+                let error_summary = format!(
+                    "MCP 请求失败: {} {}",
+                    status,
+                    Self::summarize_error_body(&body)
+                );
+                let has_available = self
+                    .token_manager
+                    .report_failure_with_error(ctx.id, Some(&error_summary));
                 if !has_available {
                     anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
                 }
@@ -747,7 +761,15 @@ impl KiroProvider {
                     body
                 );
 
-                let has_available = self.token_manager.report_quota_exhausted(ctx.id);
+                let error_summary = format!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    Self::summarize_error_body(&body)
+                );
+                let has_available = self
+                    .token_manager
+                    .report_quota_exhausted_with_error(ctx.id, Some(&error_summary));
                 self.token_manager.update_balance_cache(ctx.id, 0.0);
                 if !has_available {
                     anyhow::bail!(
@@ -771,6 +793,13 @@ impl KiroProvider {
             if status.as_u16() == 400 {
                 if Self::is_invalid_model_id(&body) {
                     let summary = Self::summarize_error_body(&body);
+                    self.token_manager.record_credential_error(
+                        ctx.id,
+                        format!(
+                            "{} API 请求失败: {} INVALID_MODEL_ID. Upstream: {}",
+                            api_type, status, summary
+                        ),
+                    );
                     tracing::warn!(
                         status = %status,
                         response_summary = %summary,
@@ -869,7 +898,15 @@ impl KiroProvider {
                     body
                 );
 
-                let has_available = self.token_manager.report_failure(ctx.id);
+                let error_summary = format!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    Self::summarize_error_body(&body)
+                );
+                let has_available = self
+                    .token_manager
+                    .report_failure_with_error(ctx.id, Some(&error_summary));
                 if !has_available {
                     anyhow::bail!(
                         "{} API 请求失败（所有凭据已用尽）: {} {}",
@@ -1001,11 +1038,18 @@ impl KiroProvider {
         body: &str,
         retry_after: Option<Duration>,
     ) -> Duration {
-        let cooldown = self.token_manager.set_credential_cooldown_with_duration(
-            credential_id,
-            crate::kiro::cooldown::CooldownReason::RateLimitExceeded,
-            retry_after,
+        let error_summary = format!(
+            "429 Too Many Requests: {}",
+            Self::summarize_error_body(body)
         );
+        let cooldown = self
+            .token_manager
+            .set_credential_cooldown_with_duration_and_message(
+                credential_id,
+                crate::kiro::cooldown::CooldownReason::RateLimitExceeded,
+                retry_after,
+                Some(&error_summary),
+            );
 
         tracing::warn!(
             credential_id = %credential_id,

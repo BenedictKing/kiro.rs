@@ -28,6 +28,32 @@ export interface CredentialHealth {
   retryAfterSecs?: number
 }
 
+export type CredentialStateEventKind =
+  | 'api_success'
+  | 'api_failure'
+  | 'token_refresh_success'
+  | 'token_refresh_failure'
+  | 'auto_recover'
+  | 'manual_disable'
+  | 'manual_enable'
+  | 'reset_and_enable'
+  | 'quota_exceeded'
+  | 'model_unavailable'
+  | 'authentication_failed'
+  | 'account_suspended'
+  | 'insufficient_balance'
+  | 'rate_limited'
+  | 'cooldown'
+  | 'upstream_error'
+
+export interface CredentialStateEvent {
+  at: string
+  kind: CredentialStateEventKind
+  previousStatus: CredentialHealthStatus
+  newStatus: CredentialHealthStatus
+  message?: string
+}
+
 export interface CredentialStatusItem {
   id: number
   priority: number
@@ -69,6 +95,10 @@ export interface CredentialStatusItem {
   effectiveEndpoint: string
   /** 凭据健康状态（只读诊断视图） */
   health: CredentialHealth
+  /** 最近一次错误摘要 */
+  lastErrorSummary?: string | null
+  /** 最近状态事件 */
+  stateEvents?: CredentialStateEvent[]
 }
 
 // 余额响应

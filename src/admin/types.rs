@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::kiro::token_manager::CredentialHealth;
+use crate::kiro::token_manager::{CredentialHealth, CredentialStateEvent};
 use crate::model::config::ServiceEndpointFamily;
 
 // ============ 凭据状态 ============
@@ -61,6 +61,10 @@ pub struct CredentialStatusItem {
     pub effective_endpoint: String,
     /// 凭据健康状态（只读诊断视图）
     pub health: CredentialHealth,
+    /// 最近一次错误摘要
+    pub last_error_summary: Option<String>,
+    /// 最近状态事件
+    pub state_events: Vec<CredentialStateEvent>,
 }
 
 // ============ 操作请求 ============

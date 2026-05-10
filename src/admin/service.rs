@@ -113,6 +113,8 @@ impl AdminService {
                     endpoint,
                     effective_endpoint,
                     health: entry.health,
+                    last_error_summary: entry.last_error_summary,
+                    state_events: entry.state_events,
                 }
             })
             .collect();
