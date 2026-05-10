@@ -1142,6 +1142,29 @@ struct RateLimitedCredentialDiag {
     wait_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+struct CredentialSelectionInfo {
+    id: u64,
+    priority: u32,
+    runtime_only: bool,
+}
+
+#[derive(Debug, Clone)]
+enum CredentialGate {
+    Selectable(CredentialSelectionInfo),
+    Disabled,
+    Tried,
+    CoolingDown {
+        id: u64,
+        reason: CooldownReason,
+        remaining: std::time::Duration,
+    },
+    RateLimited {
+        id: u64,
+        wait: std::time::Duration,
+    },
+}
+
 /// 每个凭据最大 API 调用失败次数
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 const MAX_CREDENTIAL_STATE_EVENTS: usize = 20;
@@ -1585,6 +1608,96 @@ impl MultiTokenManager {
         Some(scored[index].0)
     }
 
+    fn gate_candidate(
+        &self,
+        entry: &CredentialEntry,
+        tried_ids: &[u64],
+        consume_rate_limit: bool,
+    ) -> CredentialGate {
+        if entry.disabled {
+            return CredentialGate::Disabled;
+        }
+
+        if tried_ids.contains(&entry.id) {
+            return CredentialGate::Tried;
+        }
+
+        if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(entry.id) {
+            return CredentialGate::CoolingDown {
+                id: entry.id,
+                reason,
+                remaining,
+            };
+        }
+
+        let rate_limit = if consume_rate_limit {
+            self.rate_limiter.try_acquire(entry.id)
+        } else {
+            self.rate_limiter.check_rate_limit(entry.id)
+        };
+        if let Err(wait) = rate_limit {
+            return CredentialGate::RateLimited { id: entry.id, wait };
+        }
+
+        CredentialGate::Selectable(CredentialSelectionInfo {
+            id: entry.id,
+            priority: entry.credentials.priority,
+            runtime_only: entry.credentials.runtime_only,
+        })
+    }
+
+    fn gated_candidate_infos(
+        &self,
+        entries: &[CredentialEntry],
+        tried_ids: &mut Vec<u64>,
+        consume_rate_limit: bool,
+        min_wait: &mut Option<std::time::Duration>,
+        min_wait_detail: &mut Option<(u64, &'static str, std::time::Duration)>,
+        cooling_skipped: &mut usize,
+    ) -> Vec<CredentialSelectionInfo> {
+        let mut candidates = Vec::new();
+
+        for entry in entries {
+            match self.gate_candidate(entry, tried_ids, consume_rate_limit) {
+                CredentialGate::Selectable(info) => candidates.push(info),
+                CredentialGate::CoolingDown {
+                    id,
+                    reason,
+                    remaining,
+                } => {
+                    tracing::trace!(
+                        credential_id = %id,
+                        reason = ?reason,
+                        remaining_ms = %remaining.as_millis(),
+                        "凭据健康门控：冷却中，跳过"
+                    );
+                    if min_wait.map(|w| remaining < w).unwrap_or(true) {
+                        *min_wait_detail = Some((id, "cooldown", remaining));
+                    }
+                    *min_wait = Some(min_wait.map(|w| w.min(remaining)).unwrap_or(remaining));
+                    *cooling_skipped += 1;
+                    tried_ids.push(id);
+                }
+                CredentialGate::RateLimited { id, wait } => {
+                    tracing::trace!(
+                        credential_id = %id,
+                        wait_ms = %wait.as_millis(),
+                        "凭据健康门控：速率限制，跳过"
+                    );
+                    if min_wait.map(|w| wait < w).unwrap_or(true) {
+                        *min_wait_detail = Some((id, "rate_limit", wait));
+                    }
+                    *min_wait = Some(min_wait.map(|w| w.min(wait)).unwrap_or(wait));
+                    *cooling_skipped += 1;
+                    tried_ids.push(id);
+                }
+                CredentialGate::Disabled | CredentialGate::Tried => {}
+            }
+        }
+
+        candidates
+    }
+
     /// 获取 API 调用上下文
     ///
     /// 返回绑定了 id、credentials 和 token 的调用上下文
@@ -1713,14 +1826,17 @@ impl MultiTokenManager {
                 );
             }
 
-            let candidate_infos: Vec<(u64, u32, bool)> = {
+            let candidate_infos: Vec<CredentialSelectionInfo> = {
                 let mut entries = self.entries.lock();
 
-                let mut candidates: Vec<(u64, u32, bool)> = entries
-                    .iter()
-                    .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                    .map(|e| (e.id, e.credentials.priority, e.credentials.runtime_only))
-                    .collect();
+                let mut candidates = self.gated_candidate_infos(
+                    &entries,
+                    &mut tried_ids,
+                    false,
+                    &mut min_wait,
+                    &mut min_wait_detail,
+                    &mut cooling_skipped,
+                );
 
                 // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
                 if candidates.is_empty()
@@ -1737,11 +1853,14 @@ impl MultiTokenManager {
                         }
                     }
 
-                    candidates = entries
-                        .iter()
-                        .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                        .map(|e| (e.id, e.credentials.priority, e.credentials.runtime_only))
-                        .collect();
+                    candidates = self.gated_candidate_infos(
+                        &entries,
+                        &mut tried_ids,
+                        false,
+                        &mut min_wait,
+                        &mut min_wait_detail,
+                        &mut cooling_skipped,
+                    );
                 }
 
                 if candidates.is_empty() {
@@ -1749,54 +1868,44 @@ impl MultiTokenManager {
                     if available == 0 {
                         anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                     }
-                    anyhow::bail!(
-                        "所有可用凭据均已尝试（可用: {}/{}，已尝试: {}/{}）",
-                        available,
-                        total,
-                        tried_ids.len(),
-                        available
-                    );
+                    if min_wait.is_none() {
+                        anyhow::bail!(
+                            "所有可用凭据均已尝试（可用: {}/{}，已尝试: {}/{}）",
+                            available,
+                            total,
+                            tried_ids.len(),
+                            available
+                        );
+                    }
                 }
 
                 candidates
             };
 
+            if candidate_infos.is_empty() {
+                continue;
+            }
+
             // 按优先级选出候选集合；同优先级时，优先选择仅运行时的环境变量凭据，再做负载均衡选择
             let min_priority = candidate_infos
                 .iter()
-                .map(|(_, p, _)| *p)
+                .map(|info| info.priority)
                 .min()
                 .unwrap_or(0);
             let prefer_runtime_only = candidate_infos
                 .iter()
-                .any(|(_, p, runtime_only)| *p == min_priority && *runtime_only);
+                .any(|info| info.priority == min_priority && info.runtime_only);
             let candidate_ids: Vec<u64> = candidate_infos
                 .iter()
-                .filter(|(_, p, runtime_only)| {
-                    *p == min_priority && (!prefer_runtime_only || *runtime_only)
+                .filter(|info| {
+                    info.priority == min_priority && (!prefer_runtime_only || info.runtime_only)
                 })
-                .map(|(id, _, _)| *id)
+                .map(|info| info.id)
                 .collect();
             let id = self
                 .select_best_candidate_id(&candidate_ids)
                 .ok_or_else(|| anyhow::anyhow!("没有可用凭据"))?;
 
-            // 冷却/速率限制：把“临时不可用”的凭据视为本轮不可选，从而自然分流到其他凭据。
-            if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(id) {
-                tracing::trace!(
-                    credential_id = %id,
-                    reason = ?reason,
-                    remaining_ms = %remaining.as_millis(),
-                    "凭据处于冷却，跳过"
-                );
-                if min_wait.map(|w| remaining < w).unwrap_or(true) {
-                    min_wait_detail = Some((id, "cooldown", remaining));
-                }
-                min_wait = Some(min_wait.map(|w| w.min(remaining)).unwrap_or(remaining));
-                tried_ids.push(id);
-                cooling_skipped += 1;
-                continue;
-            }
             if let Err(wait) = self.rate_limiter.try_acquire(id) {
                 tracing::trace!(
                     credential_id = %id,
@@ -1853,13 +1962,50 @@ impl MultiTokenManager {
         let mut keep_affinity_binding = false;
 
         if let Some(bound_id) = self.affinity.get(user_id) {
-            let is_enabled = {
+            let bound_gate_and_credentials = {
                 let entries = self.entries.lock();
-                entries.iter().any(|e| e.id == bound_id && !e.disabled)
+                entries.iter().find(|e| e.id == bound_id).map(|entry| {
+                    (
+                        self.gate_candidate(entry, &[], false),
+                        entry.credentials.clone(),
+                    )
+                })
             };
 
-            if is_enabled {
-                if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(bound_id) {
+            match bound_gate_and_credentials {
+                Some((CredentialGate::Selectable(_), creds)) => {
+                    if let Err(wait) = self.rate_limiter.try_acquire(bound_id) {
+                        // check_rate_limit 通过但 try_acquire 竞争失败（TOCTOU），保留绑定分流
+                        keep_affinity_binding = true;
+                        tracing::debug!(
+                            user_id = %mask_user_id(Some(user_id)),
+                            credential_id = %bound_id,
+                            wait_ms = %wait.as_millis(),
+                            "亲和性凭据 try_acquire 竞争失败，本次将分流"
+                        );
+                    } else {
+                        match self.try_ensure_token(bound_id, &creds).await {
+                            Ok(ctx) => {
+                                self.affinity.touch(user_id);
+                                return Ok(ctx);
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    user_id = %user_id,
+                                    credential_id = %bound_id,
+                                    error = %e,
+                                    "亲和性绑定凭据 token 获取/刷新失败，本次将分流"
+                                );
+                            }
+                        }
+                    }
+                }
+                Some((
+                    CredentialGate::CoolingDown {
+                        reason, remaining, ..
+                    },
+                    _,
+                )) => {
                     // 对“长冷却”原因不保留绑定，避免长期命中后每次都先失败再回退。
                     keep_affinity_binding = matches!(
                         reason,
@@ -1876,7 +2022,8 @@ impl MultiTokenManager {
                         keep_affinity_binding = %keep_affinity_binding,
                         "亲和性绑定凭据处于冷却，本次将分流"
                     );
-                } else if let Err(wait) = self.rate_limiter.check_rate_limit(bound_id) {
+                }
+                Some((CredentialGate::RateLimited { wait, .. }, _)) => {
                     // 只读检查，不消耗速率限制配额
                     keep_affinity_binding = true;
                     tracing::info!(
@@ -1885,47 +2032,14 @@ impl MultiTokenManager {
                         wait_ms = %wait.as_millis(),
                         "亲和性绑定凭据触发速率限制，本次将分流"
                     );
-                } else if let Err(wait) = self.rate_limiter.try_acquire(bound_id) {
-                    // check_rate_limit 通过但 try_acquire 竞争失败（TOCTOU），保留绑定分流
-                    keep_affinity_binding = true;
-                    tracing::debug!(
-                        user_id = %mask_user_id(Some(user_id)),
+                }
+                Some((CredentialGate::Disabled | CredentialGate::Tried, _)) => {}
+                None => {
+                    tracing::warn!(
+                        user_id = %user_id,
                         credential_id = %bound_id,
-                        wait_ms = %wait.as_millis(),
-                        "亲和性凭据 try_acquire 竞争失败，本次将分流"
+                        "亲和性命中但凭据不存在，本次将分流"
                     );
-                } else {
-                    let credentials = {
-                        let entries = self.entries.lock();
-                        entries
-                            .iter()
-                            .find(|e| e.id == bound_id)
-                            .map(|e| e.credentials.clone())
-                    };
-
-                    match credentials {
-                        Some(creds) => match self.try_ensure_token(bound_id, &creds).await {
-                            Ok(ctx) => {
-                                self.affinity.touch(user_id);
-                                return Ok(ctx);
-                            }
-                            Err(e) => {
-                                tracing::debug!(
-                                    user_id = %user_id,
-                                    credential_id = %bound_id,
-                                    error = %e,
-                                    "亲和性绑定凭据 token 获取/刷新失败，本次将分流"
-                                );
-                            }
-                        },
-                        None => {
-                            tracing::warn!(
-                                user_id = %user_id,
-                                credential_id = %bound_id,
-                                "亲和性命中但凭据不存在，本次将分流"
-                            );
-                        }
-                    }
                 }
             }
         }
@@ -3464,26 +3578,14 @@ impl MultiTokenManager {
     /// 检查凭据是否可用（综合检查：未禁用、未冷却、未超速率限制）
     #[allow(dead_code)]
     pub fn is_credential_available(&self, id: u64) -> bool {
-        // 检查是否禁用
-        let is_disabled = {
-            let entries = self.entries.lock();
-            entries
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.disabled)
-                .unwrap_or(true)
+        let entries = self.entries.lock();
+        let Some(entry) = entries.iter().find(|e| e.id == id) else {
+            return false;
         };
-        if is_disabled {
-            return false;
-        }
-
-        // 检查冷却状态
-        if !self.cooldown_manager.is_available(id) {
-            return false;
-        }
-
-        // 检查速率限制
-        self.rate_limiter.check_rate_limit(id).is_ok()
+        matches!(
+            self.gate_candidate(entry, &[], false),
+            CredentialGate::Selectable(_)
+        )
     }
 
     /// 设置凭据冷却（带原因分类）
@@ -4125,6 +4227,27 @@ mod tests {
         assert_eq!(reason, CooldownReason::RateLimitExceeded);
         assert!(remaining <= std::time::Duration::from_secs(120));
         assert!(remaining > std::time::Duration::from_secs(100));
+    }
+
+    #[test]
+    fn test_is_credential_available_uses_health_gate() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        assert!(manager.is_credential_available(1));
+
+        manager.set_credential_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_secs(120)),
+        );
+        assert!(!manager.is_credential_available(1));
+
+        assert!(manager.clear_credential_cooldown(1));
+        assert!(manager.rate_limiter().try_acquire(1).is_ok());
+        assert!(!manager.is_credential_available(1));
     }
 
     #[test]
