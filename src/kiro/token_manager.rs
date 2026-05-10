@@ -556,6 +556,104 @@ struct CredentialEntry {
     refresh_token_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialStateTransition {
+    ApiSuccess,
+    TokenRefreshSuccess,
+    AutoRecover,
+    ManualDisable,
+    ManualEnable,
+    ResetAndEnable,
+    DisableForFailureLimit,
+    DisableForRefreshFailureLimit,
+    DisableForQuotaExceeded,
+    DisableForModelUnavailable,
+    DisableTerminal(DisableReason),
+}
+
+impl CredentialEntry {
+    fn transition(&mut self, transition: CredentialStateTransition) {
+        match transition {
+            CredentialStateTransition::ApiSuccess => {
+                self.failure_count = 0;
+            }
+            CredentialStateTransition::TokenRefreshSuccess => {
+                self.refresh_failure_count = 0;
+                if self.disable_reason == Some(DisableReason::RefreshFailureLimit) {
+                    self.disabled = false;
+                    self.auto_heal_reason = None;
+                    self.disable_reason = None;
+                }
+            }
+            CredentialStateTransition::AutoRecover => {
+                self.disabled = false;
+                self.auto_heal_reason = None;
+                self.disable_reason = None;
+                self.failure_count = 0;
+            }
+            CredentialStateTransition::ManualDisable => {
+                self.disabled = true;
+                self.auto_heal_reason = Some(AutoHealReason::Manual);
+                self.disable_reason = Some(DisableReason::Manual);
+            }
+            CredentialStateTransition::ManualEnable => {
+                self.disabled = false;
+                self.failure_count = 0;
+                self.auto_heal_reason = None;
+                self.disable_reason = None;
+            }
+            CredentialStateTransition::ResetAndEnable => {
+                self.failure_count = 0;
+                self.refresh_failure_count = 0;
+                self.disabled = false;
+                self.auto_heal_reason = None;
+                self.disable_reason = None;
+            }
+            CredentialStateTransition::DisableForFailureLimit => {
+                self.disabled = true;
+                self.auto_heal_reason = Some(AutoHealReason::TooManyFailures);
+                self.disable_reason = Some(DisableReason::FailureLimit);
+            }
+            CredentialStateTransition::DisableForRefreshFailureLimit => {
+                self.disabled = true;
+                self.auto_heal_reason = Some(AutoHealReason::TooManyFailures);
+                self.disable_reason = Some(DisableReason::RefreshFailureLimit);
+            }
+            CredentialStateTransition::DisableForQuotaExceeded => {
+                self.disabled = true;
+                self.auto_heal_reason = Some(AutoHealReason::QuotaExceeded);
+                self.disable_reason = Some(DisableReason::QuotaExceeded);
+                self.failure_count = MAX_FAILURES_PER_CREDENTIAL;
+            }
+            CredentialStateTransition::DisableForModelUnavailable => {
+                self.disabled = true;
+                self.disable_reason = Some(DisableReason::ModelUnavailable);
+            }
+            CredentialStateTransition::DisableTerminal(reason) => {
+                self.disabled = true;
+                self.auto_heal_reason = None;
+                self.disable_reason = Some(reason);
+            }
+        }
+    }
+
+    fn record_api_failure(&mut self) -> u32 {
+        self.failure_count += 1;
+        if self.failure_count >= MAX_FAILURES_PER_CREDENTIAL {
+            self.transition(CredentialStateTransition::DisableForFailureLimit);
+        }
+        self.failure_count
+    }
+
+    fn record_refresh_failure(&mut self) -> u32 {
+        self.refresh_failure_count += 1;
+        if self.refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
+            self.transition(CredentialStateTransition::DisableForRefreshFailureLimit);
+        }
+        self.refresh_failure_count
+    }
+}
+
 /// 自愈原因（内部使用，用于判断是否可自动恢复）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoHealReason {
@@ -1356,10 +1454,7 @@ impl MultiTokenManager {
                     );
                     for e in entries.iter_mut() {
                         if e.auto_heal_reason == Some(AutoHealReason::TooManyFailures) {
-                            e.disabled = false;
-                            e.auto_heal_reason = None;
-                            e.disable_reason = None;
-                            e.failure_count = 0;
+                            e.transition(CredentialStateTransition::AutoRecover);
                         }
                     }
 
@@ -1821,14 +1916,8 @@ impl MultiTokenManager {
                             Ok(creds) => {
                                 let mut entries = self.entries.lock();
                                 if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                                    entry.refresh_failure_count = 0;
-                                    if entry.disable_reason
-                                        == Some(DisableReason::RefreshFailureLimit)
-                                    {
-                                        entry.disabled = false;
-                                        entry.auto_heal_reason = None;
-                                        entry.disable_reason = None;
-                                    }
+                                    entry
+                                        .transition(CredentialStateTransition::TokenRefreshSuccess);
                                 }
                                 creds
                             }
@@ -1846,15 +1935,7 @@ impl MultiTokenManager {
                                 let has_available = {
                                     let mut entries = self.entries.lock();
                                     if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                                        entry.refresh_failure_count += 1;
-                                        let refresh_failure_count = entry.refresh_failure_count;
-                                        if refresh_failure_count >= MAX_FAILURES_PER_CREDENTIAL {
-                                            entry.disabled = true;
-                                            entry.auto_heal_reason =
-                                                Some(AutoHealReason::TooManyFailures);
-                                            entry.disable_reason =
-                                                Some(DisableReason::RefreshFailureLimit);
-                                        }
+                                        entry.record_refresh_failure();
                                     }
                                     entries.iter().any(|e| !e.disabled && e.id != id)
                                 };
@@ -2141,7 +2222,7 @@ impl MultiTokenManager {
         {
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                entry.failure_count = 0;
+                entry.transition(CredentialStateTransition::ApiSuccess);
                 entry.success_count += 1;
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
                 tracing::debug!(
@@ -2170,9 +2251,8 @@ impl MultiTokenManager {
                 None => return entries.iter().any(|e| !e.disabled),
             };
 
-            entry.failure_count += 1;
+            let failure_count = entry.record_api_failure();
             entry.last_used_at = Some(Utc::now().to_rfc3339());
-            let failure_count = entry.failure_count;
 
             tracing::warn!(
                 "凭据 #{} API 调用失败（{}/{}）",
@@ -2182,9 +2262,6 @@ impl MultiTokenManager {
             );
 
             if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
-                entry.disabled = true;
-                entry.auto_heal_reason = Some(AutoHealReason::TooManyFailures);
-                entry.disable_reason = Some(DisableReason::FailureLimit);
                 tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
 
                 // 移除该凭据的亲和性绑定
@@ -2221,12 +2298,8 @@ impl MultiTokenManager {
                 return entries.iter().any(|e| !e.disabled);
             }
 
-            entry.disabled = true;
-            entry.auto_heal_reason = Some(AutoHealReason::QuotaExceeded);
-            entry.disable_reason = Some(DisableReason::QuotaExceeded);
+            entry.transition(CredentialStateTransition::DisableForQuotaExceeded);
             entry.last_used_at = Some(Utc::now().to_rfc3339());
-            // 设为阈值，便于在管理面板中直观看到该凭据已不可用
-            entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
 
             tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用", id);
 
@@ -2263,8 +2336,12 @@ impl MultiTokenManager {
 
         for entry in entries.iter_mut() {
             if !entry.disabled {
-                entry.disabled = true;
-                entry.disable_reason = Some(reason);
+                match reason {
+                    DisableReason::ModelUnavailable => {
+                        entry.transition(CredentialStateTransition::DisableForModelUnavailable);
+                    }
+                    _ => entry.transition(CredentialStateTransition::DisableTerminal(reason)),
+                }
             }
         }
 
@@ -2302,9 +2379,7 @@ impl MultiTokenManager {
         for entry in entries.iter_mut() {
             // 只恢复因 ModelUnavailable 禁用的凭据，余额不足的不恢复
             if entry.disabled && entry.disable_reason == Some(DisableReason::ModelUnavailable) {
-                entry.disabled = false;
-                entry.disable_reason = None;
-                entry.failure_count = 0;
+                entry.transition(CredentialStateTransition::AutoRecover);
                 recovered_count += 1;
             }
         }
@@ -2324,9 +2399,9 @@ impl MultiTokenManager {
     pub fn mark_authentication_failed(&self, id: u64) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.disabled = true;
-            entry.auto_heal_reason = None;
-            entry.disable_reason = Some(DisableReason::AuthenticationFailed);
+            entry.transition(CredentialStateTransition::DisableTerminal(
+                DisableReason::AuthenticationFailed,
+            ));
             tracing::warn!("凭据 #{} 已标记为认证失败", id);
         }
         drop(entries);
@@ -2337,9 +2412,9 @@ impl MultiTokenManager {
     pub fn mark_account_suspended(&self, id: u64) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.disabled = true;
-            entry.auto_heal_reason = None;
-            entry.disable_reason = Some(DisableReason::AccountSuspended);
+            entry.transition(CredentialStateTransition::DisableTerminal(
+                DisableReason::AccountSuspended,
+            ));
             tracing::warn!("凭据 #{} 已标记为账户暂停", id);
         }
         drop(entries);
@@ -2350,9 +2425,9 @@ impl MultiTokenManager {
     pub fn mark_insufficient_balance(&self, id: u64) {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.disabled = true;
-            entry.auto_heal_reason = None; // 清除自愈原因，防止被自愈循环错误恢复
-            entry.disable_reason = Some(DisableReason::InsufficientBalance);
+            entry.transition(CredentialStateTransition::DisableTerminal(
+                DisableReason::InsufficientBalance,
+            ));
             tracing::warn!("凭据 #{} 已标记为余额不足", id);
         }
     }
@@ -2413,8 +2488,9 @@ impl MultiTokenManager {
                     if remaining < 1.0 {
                         let mut entries = self.entries.lock();
                         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                            entry.disabled = true;
-                            entry.disable_reason = Some(DisableReason::InsufficientBalance);
+                            entry.transition(CredentialStateTransition::DisableTerminal(
+                                DisableReason::InsufficientBalance,
+                            ));
                             tracing::warn!("凭据 #{} 余额不足 ({:.2})，已自动禁用", id, remaining);
                         }
                     } else {
@@ -2656,15 +2732,10 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
-            entry.disabled = disabled;
-            if !disabled {
-                // 启用时重置失败计数
-                entry.failure_count = 0;
-                entry.auto_heal_reason = None;
-                entry.disable_reason = None;
+            if disabled {
+                entry.transition(CredentialStateTransition::ManualDisable);
             } else {
-                entry.auto_heal_reason = Some(AutoHealReason::Manual);
-                entry.disable_reason = Some(DisableReason::Manual);
+                entry.transition(CredentialStateTransition::ManualEnable);
             }
         }
         // 持久化更改
@@ -2729,11 +2800,7 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
-            entry.failure_count = 0;
-            entry.refresh_failure_count = 0;
-            entry.disabled = false;
-            entry.auto_heal_reason = None;
-            entry.disable_reason = None;
+            entry.transition(CredentialStateTransition::ResetAndEnable);
         }
         // 持久化更改
         self.persist_credentials()?;
@@ -2766,15 +2833,14 @@ impl MultiTokenManager {
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
                 entry.credentials = new_creds.clone();
-                entry.refresh_failure_count = 0;
                 entry.refresh_token_hash = credential_secret_hash(&new_creds);
 
                 // 仅对自动禁用（失败阈值/刷新失败）自动恢复，手动禁用状态保持不变
-                if entry.disabled && entry.disable_reason != Some(DisableReason::Manual) {
-                    entry.failure_count = 0;
-                    entry.disabled = false;
-                    entry.auto_heal_reason = None;
-                    entry.disable_reason = None;
+                let should_auto_recover =
+                    entry.disabled && entry.disable_reason != Some(DisableReason::Manual);
+                entry.transition(CredentialStateTransition::TokenRefreshSuccess);
+                if should_auto_recover {
+                    entry.transition(CredentialStateTransition::AutoRecover);
                 }
             }
         }
@@ -3383,6 +3449,52 @@ mod tests {
             result,
             "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
         );
+    }
+
+    fn test_credential_entry() -> CredentialEntry {
+        CredentialEntry {
+            id: 1,
+            credentials: KiroCredentials::default(),
+            failure_count: 0,
+            refresh_failure_count: 0,
+            disabled: false,
+            auto_heal_reason: None,
+            disable_reason: None,
+            fingerprint: Fingerprint::generate_from_seed("test"),
+            success_count: 0,
+            last_used_at: None,
+            refresh_token_hash: None,
+        }
+    }
+
+    #[test]
+    fn test_credential_transition_api_failure_disables_at_limit() {
+        let mut entry = test_credential_entry();
+
+        for expected in 1..=MAX_FAILURES_PER_CREDENTIAL {
+            assert_eq!(entry.record_api_failure(), expected);
+        }
+
+        assert!(entry.disabled);
+        assert_eq!(
+            entry.auto_heal_reason,
+            Some(AutoHealReason::TooManyFailures)
+        );
+        assert_eq!(entry.disable_reason, Some(DisableReason::FailureLimit));
+    }
+
+    #[test]
+    fn test_credential_transition_terminal_disable_clears_auto_heal() {
+        let mut entry = test_credential_entry();
+        entry.transition(CredentialStateTransition::DisableForFailureLimit);
+
+        entry.transition(CredentialStateTransition::DisableTerminal(
+            DisableReason::AccountSuspended,
+        ));
+
+        assert!(entry.disabled);
+        assert_eq!(entry.auto_heal_reason, None);
+        assert_eq!(entry.disable_reason, Some(DisableReason::AccountSuspended));
     }
 
     #[tokio::test]
