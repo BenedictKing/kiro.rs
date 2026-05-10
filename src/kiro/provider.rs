@@ -21,6 +21,10 @@ use crate::kiro::endpoint::{
 };
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::model::requests::conversation::{
+    ConversationState, CurrentMessage, UserInputMessage,
+};
+use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::token_manager::{CallContext, MultiTokenManager};
 
 /// API 调用结果
@@ -136,6 +140,99 @@ impl KiroProvider {
         *self.default_endpoint.write() = default_endpoint;
         tracing::info!("默认 endpoint 已热更新");
         Ok(())
+    }
+
+    fn smoke_check_request_body() -> anyhow::Result<String> {
+        let conversation_state =
+            ConversationState::new(format!("kiro-rs-smoke-{}", uuid::Uuid::new_v4()))
+                .with_agent_task_type("vibe")
+                .with_chat_trigger_type("MANUAL")
+                .with_current_message(CurrentMessage::new(UserInputMessage::new(
+                    "Reply with OK.",
+                    "claude-sonnet-4.5",
+                )));
+
+        let request = KiroRequest {
+            conversation_state,
+            profile_arn: None,
+        };
+
+        Ok(serde_json::to_string(&request)?)
+    }
+
+    /// 使用指定凭据发送最小消息，验证账号不仅能刷新/查余额，也能实际发消息。
+    pub async fn smoke_check_credential(&self, credential_id: u64) -> anyhow::Result<()> {
+        let request_body = Self::smoke_check_request_body()?;
+        let mut forced_token_refresh = false;
+
+        for attempt in 0..2 {
+            let ctx = self
+                .token_manager
+                .acquire_context_for_id(credential_id)
+                .await?;
+            let config = self.token_manager.config();
+            let machine_id = machine_id::generate_from_credentials(&ctx.credentials, &config)
+                .ok_or_else(|| anyhow::anyhow!("无法生成 machine_id，请检查凭证配置"))?;
+            let endpoint = self.endpoint_for(&ctx.credentials)?;
+            let request_ctx = RequestContext {
+                credentials: &ctx.credentials,
+                token: &ctx.token,
+                machine_id: &machine_id,
+                config: &config,
+            };
+            let url = endpoint.api_url(&request_ctx);
+            let body = endpoint
+                .transform_api_body(&request_body, &request_ctx)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "smoke check 变换 endpoint 请求体失败，使用原始请求体: {}",
+                        e
+                    );
+                    request_body.clone()
+                });
+
+            let client = self.get_client_for_credential(&ctx);
+            let request = endpoint.decorate_api(
+                client
+                    .post(&url)
+                    .timeout(Duration::from_secs(60))
+                    .body(body)
+                    .header("content-type", "application/json")
+                    .header("Connection", "close"),
+                &request_ctx,
+            );
+
+            let response = request.send().await?;
+            let status = response.status();
+            if status.is_success() {
+                tracing::info!(
+                    credential_id,
+                    endpoint = %endpoint.name(),
+                    "凭据 smoke check 发消息成功"
+                );
+                return Ok(());
+            }
+
+            let response_body = response.text().await.unwrap_or_default();
+            if matches!(status.as_u16(), 401 | 403)
+                && endpoint.is_bearer_token_invalid(&response_body)
+                && !forced_token_refresh
+            {
+                forced_token_refresh = true;
+                self.token_manager.invalidate_access_token(ctx.id);
+                tracing::warn!(
+                    credential_id,
+                    attempt,
+                    "凭据 smoke check 遇到无效 bearer token，刷新后重试"
+                );
+                continue;
+            }
+
+            let summary = Self::summarize_error_body(&response_body);
+            anyhow::bail!("发消息验活失败: {} {}", status, summary);
+        }
+
+        anyhow::bail!("发消息验活失败: 重试后仍无法通过")
     }
 
     /// 获取凭据对应的 HTTP Client
@@ -1153,6 +1250,29 @@ mod tests {
         };
         assert!(endpoint.api_url(&ctx).contains("amazonaws.com"));
         assert!(endpoint.api_url(&ctx).contains("generateAssistantResponse"));
+    }
+
+    #[test]
+    fn test_smoke_check_request_body_is_minimal_message() {
+        let body = KiroProvider::smoke_check_request_body().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(
+            value.pointer("/conversationState/agentTaskType"),
+            Some(&serde_json::Value::String("vibe".to_string()))
+        );
+        assert_eq!(
+            value.pointer("/conversationState/chatTriggerType"),
+            Some(&serde_json::Value::String("MANUAL".to_string()))
+        );
+        assert_eq!(
+            value.pointer("/conversationState/currentMessage/userInputMessage/modelId"),
+            Some(&serde_json::Value::String("claude-sonnet-4.5".to_string()))
+        );
+        assert_eq!(
+            value.pointer("/conversationState/currentMessage/userInputMessage/content"),
+            Some(&serde_json::Value::String("Reply with OK.".to_string()))
+        );
     }
 
     #[test]

@@ -297,6 +297,7 @@ export interface TokenJsonItem {
 // 批量导入请求
 export interface ImportTokenJsonRequest {
   dryRun?: boolean
+  smokeCheck?: boolean
   items: TokenJsonItem | TokenJsonItem[]
 }
 

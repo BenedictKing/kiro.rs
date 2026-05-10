@@ -1513,6 +1513,27 @@ impl MultiTokenManager {
         Ok(ctx)
     }
 
+    /// 获取指定凭据的 API 调用上下文
+    ///
+    /// 用于 Admin 侧定向验证某个刚导入的凭据，避免走负载均衡选到其他凭据。
+    pub async fn acquire_context_for_id(&self, id: u64) -> anyhow::Result<CallContext> {
+        self.check_and_recover();
+
+        let credentials = {
+            let entries = self.entries.lock();
+            let entry = entries
+                .iter()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据 #{} 不存在", id))?;
+            if entry.disabled {
+                anyhow::bail!("凭据 #{} 已禁用", id);
+            }
+            entry.credentials.clone()
+        };
+
+        self.try_ensure_token(id, &credentials).await
+    }
+
     /// 获取缓存的余额（用于故障转移选择）
     #[allow(dead_code)]
     fn get_cached_balance(&self, id: u64) -> f64 {

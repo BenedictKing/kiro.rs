@@ -277,6 +277,9 @@ pub struct TokenJsonItem {
 pub struct ImportTokenJsonRequest {
     #[serde(default = "default_dry_run")]
     pub dry_run: bool,
+    /// 导入时发送最小消息验活，失败的凭据不会保留
+    #[serde(default)]
+    pub smoke_check: bool,
     pub items: ImportItems,
 }
 

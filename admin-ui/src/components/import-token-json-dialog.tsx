@@ -340,7 +340,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
   // 确认导入
   const handleConfirmImport = useCallback(() => {
     importMutate(
-      { dryRun: false, items: parsedItems },
+      { dryRun: false, smokeCheck: enableVerify, items: parsedItems },
       {
         onSuccess: (response) => {
           setFinalResults(response.items)
@@ -548,7 +548,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
                   <div>
                     <div className="text-sm font-medium">导入后自动验活</div>
                     <div className="text-xs text-muted-foreground">
-                      逐个检查凭据有效性，失败的自动排除
+                      服务端发送最小消息验活，失败的自动排除
                     </div>
                   </div>
                   <Switch checked={enableVerify} onCheckedChange={setEnableVerify} />

@@ -561,6 +561,7 @@ impl AdminService {
     pub async fn import_token_json(&self, req: ImportTokenJsonRequest) -> ImportTokenJsonResponse {
         let items = req.items.into_vec();
         let dry_run = req.dry_run;
+        let smoke_check = req.smoke_check;
 
         let mut results = Vec::with_capacity(items.len());
         let mut added = 0usize;
@@ -568,7 +569,9 @@ impl AdminService {
         let mut invalid = 0usize;
 
         for (index, item) in items.into_iter().enumerate() {
-            let result = self.process_token_json_item(index, item, dry_run).await;
+            let result = self
+                .process_token_json_item(index, item, dry_run, smoke_check)
+                .await;
             match result.action {
                 ImportAction::Added => added += 1,
                 ImportAction::Skipped => skipped += 1,
@@ -594,6 +597,7 @@ impl AdminService {
         index: usize,
         item: TokenJsonItem,
         dry_run: bool,
+        smoke_check: bool,
     ) -> ImportItemResult {
         // 生成指纹（用于识别和去重）
         let fingerprint = Self::generate_fingerprint(&item);
@@ -682,13 +686,28 @@ impl AdminService {
         };
 
         match self.token_manager.add_credential(new_cred).await {
-            Ok(credential_id) => ImportItemResult {
-                index,
-                fingerprint,
-                action: ImportAction::Added,
-                reason: None,
-                credential_id: Some(credential_id),
-            },
+            Ok(credential_id) => {
+                if smoke_check
+                    && let Err(e) = self.smoke_check_imported_credential(credential_id).await
+                {
+                    self.rollback_imported_credential(credential_id);
+                    return ImportItemResult {
+                        index,
+                        fingerprint,
+                        action: ImportAction::Invalid,
+                        reason: Some(e.to_string()),
+                        credential_id: None,
+                    };
+                }
+
+                ImportItemResult {
+                    index,
+                    fingerprint,
+                    action: ImportAction::Added,
+                    reason: smoke_check.then(|| "发消息验活通过".to_string()),
+                    credential_id: Some(credential_id),
+                }
+            }
             Err(e) => ImportItemResult {
                 index,
                 fingerprint,
@@ -696,6 +715,34 @@ impl AdminService {
                 reason: Some(e.to_string()),
                 credential_id: None,
             },
+        }
+    }
+
+    async fn smoke_check_imported_credential(&self, credential_id: u64) -> anyhow::Result<()> {
+        let provider = self
+            .kiro_provider
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("KiroProvider 未配置，无法执行发消息验活"))?;
+
+        provider.smoke_check_credential(credential_id).await
+    }
+
+    fn rollback_imported_credential(&self, credential_id: u64) {
+        if let Err(e) = self.token_manager.set_disabled(credential_id, true) {
+            tracing::warn!(
+                credential_id,
+                "导入发消息验活失败后禁用凭据失败，无法自动回滚: {}",
+                e
+            );
+            return;
+        }
+
+        if let Err(e) = self.token_manager.delete_credential(credential_id) {
+            tracing::warn!(
+                credential_id,
+                "导入发消息验活失败后删除凭据失败，请手动清理: {}",
+                e
+            );
         }
     }
 
