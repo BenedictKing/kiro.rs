@@ -144,6 +144,10 @@ fn is_input_too_long_error(err: &Error) -> bool {
     s.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") || s.contains("Input is too long")
 }
 
+fn is_invalid_model_id_error(err: &Error) -> bool {
+    err.to_string().contains("INVALID_MODEL_ID")
+}
+
 fn is_quota_exhausted_error(err: &Error) -> bool {
     let s = err.to_string();
     s.contains("所有凭据已用尽")
@@ -473,6 +477,22 @@ fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Respon
             Json(ErrorResponse::new(
                 "invalid_request_error",
                 "Improperly formed request. This is often caused by oversized payloads, malformed message/tool sequences, or empty content blocks.",
+            )),
+        )
+            .into_response();
+    }
+
+    if is_invalid_model_id_error(&err) {
+        tracing::warn!(
+            error = %err,
+            kiro_request_body_bytes = request_body.len(),
+            "上游拒绝请求：INVALID_MODEL_ID（可能与账号/订阅/region/代理有关）"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "invalid_request_error",
+                "INVALID_MODEL_ID. Kiro rejected the selected model for this credential. Check account status, subscription, API region, endpoint family, and proxy/region routing.",
             )),
         )
             .into_response();
@@ -2086,6 +2106,13 @@ mod tests {
             "{}",
             anyhow::anyhow!("400 Improperly formed request"),
         );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_invalid_model_id_maps_to_bad_request() {
+        let response =
+            map_kiro_provider_error_to_response("{}", anyhow::anyhow!("400 INVALID_MODEL_ID"));
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
