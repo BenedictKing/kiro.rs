@@ -672,6 +672,23 @@ impl KiroProvider {
 
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
+                if Self::is_invalid_model_id(&body) {
+                    let summary = Self::summarize_error_body(&body);
+                    tracing::warn!(
+                        status = %status,
+                        response_summary = %summary,
+                        endpoint = %endpoint_name,
+                        credential_id = %ctx.id,
+                        "400 Bad Request - INVALID_MODEL_ID，可能为账号/订阅/region/代理侧模型不可用"
+                    );
+                    anyhow::bail!(
+                        "{} API 请求失败: {} INVALID_MODEL_ID. Kiro rejected the selected model for this credential. Check account status, subscription, API region, endpoint family, and proxy/region routing. Upstream: {}",
+                        api_type,
+                        status,
+                        summary
+                    );
+                }
+
                 let is_too_long = Self::is_input_too_long(&body);
                 // 输入过长错误：只记录请求体大小，不输出完整内容（太占空间且无调试价值）
                 if is_too_long {
@@ -983,6 +1000,25 @@ impl KiroProvider {
             .pointer("/error/reason")
             .and_then(|v| v.as_str())
             .is_some_and(|v| v == "MODEL_TEMPORARILY_UNAVAILABLE")
+    }
+
+    /// 检测是否为 INVALID_MODEL_ID 错误
+    fn is_invalid_model_id(body: &str) -> bool {
+        if body.contains("INVALID_MODEL_ID") {
+            return true;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+            return false;
+        };
+
+        value
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .or_else(|| value.get("Reason").and_then(|v| v.as_str()))
+            .or_else(|| value.pointer("/error/reason").and_then(|v| v.as_str()))
+            .or_else(|| value.pointer("/error/Reason").and_then(|v| v.as_str()))
+            .is_some_and(|v| v == "INVALID_MODEL_ID")
     }
 
     /// 检测是否为「输入过长」类错误
@@ -1528,6 +1564,24 @@ mod tests {
     fn test_is_invalid_bearer_token_false() {
         let body = r#"{"message":"Forbidden","reason":null}"#;
         assert!(!default_is_bearer_token_invalid(body));
+    }
+
+    #[test]
+    fn test_is_invalid_model_id_detects_reason() {
+        let body = r#"{"message":"Invalid model id","reason":"INVALID_MODEL_ID"}"#;
+        assert!(KiroProvider::is_invalid_model_id(body));
+    }
+
+    #[test]
+    fn test_is_invalid_model_id_detects_nested_reason() {
+        let body = r#"{"error":{"message":"Invalid model id","reason":"INVALID_MODEL_ID"}}"#;
+        assert!(KiroProvider::is_invalid_model_id(body));
+    }
+
+    #[test]
+    fn test_is_invalid_model_id_false() {
+        let body = r#"{"message":"Improperly formed request","reason":"BAD_REQUEST"}"#;
+        assert!(!KiroProvider::is_invalid_model_id(body));
     }
 
     #[test]
