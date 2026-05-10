@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { useAddCredential } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 
@@ -33,6 +34,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
+  const [smokeCheck, setSmokeCheck] = useState(false)
 
   const { mutate, isPending } = useAddCredential()
   const isApiKey = authMethod === 'api_key'
@@ -51,6 +53,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setProxyUrl('')
     setProxyUsername('')
     setProxyPassword('')
+    setSmokeCheck(false)
   }
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -88,6 +91,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         proxyUrl: proxyUrl.trim() || undefined,
         proxyUsername: proxyUsername.trim() || undefined,
         proxyPassword: proxyPassword.trim() || undefined,
+        smokeCheck,
       },
       {
         onSuccess: (data) => {
@@ -306,6 +310,16 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               <p className="text-xs text-muted-foreground">
                 留空使用全局代理。输入 "direct" 可显式不使用代理
               </p>
+            </div>
+
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="space-y-1">
+                <label className="text-sm font-medium">发消息验活</label>
+                <p className="text-xs text-muted-foreground">
+                  添加后发送最小消息验证，失败时不保留凭据
+                </p>
+              </div>
+              <Switch checked={smokeCheck} onCheckedChange={setSmokeCheck} disabled={isPending} />
             </div>
           </div>
 

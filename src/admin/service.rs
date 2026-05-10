@@ -365,6 +365,16 @@ impl AdminService {
             .await
             .map_err(|e| self.classify_add_error(e))?;
 
+        if req.smoke_check
+            && let Err(e) = self.smoke_check_credential(credential_id).await
+        {
+            self.rollback_added_credential(credential_id);
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "发消息验活失败: {}",
+                e
+            )));
+        }
+
         if let Err(e) = self.token_manager.get_usage_limits_for(credential_id).await {
             tracing::warn!("添加凭据后获取订阅等级失败（不影响凭据添加）: {}", e);
         }
@@ -718,7 +728,7 @@ impl AdminService {
         }
     }
 
-    async fn smoke_check_imported_credential(&self, credential_id: u64) -> anyhow::Result<()> {
+    async fn smoke_check_credential(&self, credential_id: u64) -> anyhow::Result<()> {
         let provider = self
             .kiro_provider
             .as_ref()
@@ -727,11 +737,15 @@ impl AdminService {
         provider.smoke_check_credential(credential_id).await
     }
 
-    fn rollback_imported_credential(&self, credential_id: u64) {
+    async fn smoke_check_imported_credential(&self, credential_id: u64) -> anyhow::Result<()> {
+        self.smoke_check_credential(credential_id).await
+    }
+
+    fn rollback_added_credential(&self, credential_id: u64) {
         if let Err(e) = self.token_manager.set_disabled(credential_id, true) {
             tracing::warn!(
                 credential_id,
-                "导入发消息验活失败后禁用凭据失败，无法自动回滚: {}",
+                "发消息验活失败后禁用凭据失败，无法自动回滚: {}",
                 e
             );
             return;
@@ -740,10 +754,14 @@ impl AdminService {
         if let Err(e) = self.token_manager.delete_credential(credential_id) {
             tracing::warn!(
                 credential_id,
-                "导入发消息验活失败后删除凭据失败，请手动清理: {}",
+                "发消息验活失败后删除凭据失败，请手动清理: {}",
                 e
             );
         }
+    }
+
+    fn rollback_imported_credential(&self, credential_id: u64) {
+        self.rollback_added_credential(credential_id);
     }
 
     /// 生成凭据指纹（用于识别）

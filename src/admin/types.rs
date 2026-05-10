@@ -145,6 +145,10 @@ pub struct AddCredentialRequest {
 
     /// 凭据级代理密码
     pub proxy_password: Option<String>,
+
+    /// 添加后发送最小消息验活，失败时不会保留凭据
+    #[serde(default)]
+    pub smoke_check: bool,
 }
 
 fn default_auth_method() -> String {

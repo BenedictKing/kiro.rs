@@ -149,6 +149,7 @@ export interface AddCredentialRequest {
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
+  smokeCheck?: boolean
 }
 
 // 添加凭据响应
