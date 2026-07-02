@@ -5,11 +5,13 @@
 //! 参考 CLIProxyAPIPlus 的实现。
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// 冷却原因
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CooldownReason {
     /// 429 速率限制
     RateLimitExceeded,
@@ -93,6 +95,19 @@ struct CooldownEntry {
     trigger_count: u32,
 }
 
+/// 可序列化的冷却条目（用于持久化长冷却）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistentCooldownEntry {
+    /// 凭据 ID
+    credential_id: u64,
+    /// 冷却原因
+    reason: CooldownReason,
+    /// 冷却结束时间（RFC3339 格式）
+    expires_at: String,
+    /// 连续触发次数
+    trigger_count: u32,
+}
+
 /// 冷却管理器
 ///
 /// 管理所有凭据的冷却状态
@@ -105,6 +120,9 @@ pub struct CooldownManager {
 
     /// 长冷却时长（秒）
     long_cooldown_secs: u64,
+
+    /// 持久化文件路径（仅用于长冷却）
+    persist_path: Option<PathBuf>,
 }
 
 impl Default for CooldownManager {
@@ -120,6 +138,7 @@ impl CooldownManager {
             entries: Mutex::new(HashMap::new()),
             max_short_cooldown_secs: 300, // 5 分钟
             long_cooldown_secs: 86400,    // 24 小时
+            persist_path: None,
         }
     }
 
@@ -130,7 +149,14 @@ impl CooldownManager {
             entries: Mutex::new(HashMap::new()),
             max_short_cooldown_secs,
             long_cooldown_secs,
+            persist_path: None,
         }
+    }
+
+    /// 设置持久化路径（启用长冷却持久化）
+    pub fn with_persist_path(mut self, path: PathBuf) -> Self {
+        self.persist_path = Some(path);
+        self
     }
 
     /// 设置凭据冷却
@@ -182,6 +208,12 @@ impl CooldownManager {
             trigger_count = %entry.trigger_count,
             "凭据进入冷却"
         );
+
+        // 长冷却持久化
+        if !reason.is_auto_recoverable() {
+            drop(entries); // 释放锁再持久化
+            self.save_persistent_cooldowns();
+        }
 
         duration
     }
@@ -262,6 +294,112 @@ impl CooldownManager {
         } else {
             // 不可自动恢复的原因：使用长冷却时长
             Duration::from_secs(self.long_cooldown_secs)
+        }
+    }
+
+    /// 持久化非自动恢复的长冷却到磁盘
+    fn save_persistent_cooldowns(&self) {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return,
+        };
+
+        let entries = self.entries.lock();
+        let now = chrono::Utc::now();
+
+        // 只持久化非自动恢复且未过期的冷却
+        let persistent: Vec<PersistentCooldownEntry> = entries
+            .iter()
+            .filter(|(_, e)| !e.reason.is_auto_recoverable() && Instant::now() < e.expires_at)
+            .map(|(&id, e)| {
+                // 计算 expires_at 的绝对时间：now + (expires_at - Instant::now())
+                let remaining = e
+                    .expires_at
+                    .saturating_duration_since(Instant::now());
+                let expires_at = now + chrono::Duration::from_std(remaining).unwrap_or_default();
+                PersistentCooldownEntry {
+                    credential_id: id,
+                    reason: e.reason,
+                    expires_at: expires_at.to_rfc3339(),
+                    trigger_count: e.trigger_count,
+                }
+            })
+            .collect();
+
+        if persistent.is_empty() {
+            // 无长冷却需要持久化时删除文件
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+
+        match serde_json::to_string_pretty(&persistent) {
+            Ok(json) => {
+                let tmp = path.with_extension("json.tmp");
+                if std::fs::write(&tmp, &json).is_ok() {
+                    if let Err(e) = std::fs::rename(&tmp, path) {
+                        tracing::warn!("原子重命名冷却持久化文件失败: {}", e);
+                        let _ = std::fs::remove_file(&tmp);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("序列化冷却数据失败: {}", e),
+        }
+    }
+
+    /// 从磁盘加载持久化的长冷却
+    ///
+    /// 已过期的条目会被丢弃，未过期的条目恢复到内存中
+    pub fn load_persistent_cooldowns(&self) {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return,
+        };
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return, // 文件不存在（首次运行或已清理）
+        };
+
+        let persistent: Vec<PersistentCooldownEntry> = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("解析冷却持久化文件失败，将忽略: {}", e);
+                return;
+            }
+        };
+
+        let now = Instant::now();
+        let utc_now = chrono::Utc::now();
+        let mut entries = self.entries.lock();
+
+        for p in persistent {
+            let expires_at_utc =
+                chrono::DateTime::parse_from_rfc3339(&p.expires_at).map(|dt| dt.with_timezone(&chrono::Utc));
+            let expires_at_utc = match expires_at_utc {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            // 已过期的条目跳过
+            if expires_at_utc <= utc_now {
+                continue;
+            }
+            // 计算 Instant 偏移：remaining = expires_at_utc - utc_now
+            let remaining = (expires_at_utc - utc_now)
+                .to_std()
+                .unwrap_or(Duration::from_secs(1));
+            let entry = CooldownEntry {
+                reason: p.reason,
+                started_at: now,
+                expires_at: now + remaining,
+                trigger_count: p.trigger_count,
+            };
+            entries.insert(p.credential_id, entry);
+            tracing::info!(
+                credential_id = %p.credential_id,
+                reason = %p.reason.description(),
+                remaining_secs = %remaining.as_secs(),
+                "从持久化恢复长冷却"
+            );
         }
     }
 }
