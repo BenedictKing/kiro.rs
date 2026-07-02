@@ -1239,7 +1239,7 @@ pub async fn post_messages(
             tool_name_map: tool_name_map.clone(),
             user_id: user_id.as_deref(),
         };
-        handle_stream_request(provider, stream_request).await
+        handle_stream_request(provider, stream_request, state.trace_db.clone()).await
     } else {
         // 非流式响应
         let non_stream_request = NonStreamRequestContext {
@@ -1253,20 +1253,35 @@ pub async fn post_messages(
                 .then_some(&prompt_cache.tracker),
             cache_profile: cache_profile.as_ref(),
         };
-        handle_non_stream_request(provider, non_stream_request).await
+        handle_non_stream_request(provider, non_stream_request, state.trace_db.clone()).await
     }
 }
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     context: StreamRequestContext<'_>,
+    trace_db: Option<std::sync::Arc<crate::admin::trace_db::TraceDb>>,
 ) -> Response {
+    // 创建请求追踪器
+    let mut trace = Some(crate::kiro::trace::RequestTrace::new(
+        "/v1/messages",
+        Some(context.model.to_string()),
+        true,
+    ));
+
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider
-        .call_api_stream(context.request_body, context.user_id)
+        .call_api_stream_traced(context.request_body, context.user_id, &mut trace)
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return map_kiro_provider_error_to_response(context.request_body, e),
+        Err(e) => {
+            // 记录失败的 trace
+            if let (Some(t), Some(db)) = (trace, trace_db.as_ref()) {
+                let record = t.finish(502, None, None, Some(e.to_string()));
+                db.record(record).await;
+            }
+            return map_kiro_provider_error_to_response(context.request_body, e);
+        }
     };
 
     let final_cache_context = match (context.cache_tracker, context.cache_profile) {
@@ -1306,6 +1321,12 @@ async fn handle_stream_request(
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
+
+    // 记录请求追踪（流式请求在 API 调用成功后立即记录，output_tokens 在流结束后才能确定）
+    if let (Some(t), Some(db)) = (trace, trace_db.as_ref()) {
+        let record = t.finish(200, Some(context.input_tokens), None, None);
+        db.record(record).await;
+    }
 
     // 创建 SSE 流
     let stream = create_sse_stream(api_result.response, ctx, initial_events);
@@ -1426,14 +1447,29 @@ fn create_sse_stream(
 async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     context: NonStreamRequestContext<'_>,
+    trace_db: Option<std::sync::Arc<crate::admin::trace_db::TraceDb>>,
 ) -> Response {
+    // 创建请求追踪器
+    let mut trace = Some(crate::kiro::trace::RequestTrace::new(
+        "/v1/messages",
+        Some(context.model.to_string()),
+        false,
+    ));
+
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider
-        .call_api(context.request_body, context.user_id)
+        .call_api_traced(context.request_body, context.user_id, &mut trace)
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return map_kiro_provider_error_to_response(context.request_body, e),
+        Err(e) => {
+            // 记录失败的 trace
+            if let (Some(t), Some(db)) = (trace, trace_db.as_ref()) {
+                let record = t.finish(502, None, None, Some(e.to_string()));
+                db.record(record).await;
+            }
+            return map_kiro_provider_error_to_response(context.request_body, e);
+        }
     };
 
     let final_cache_context = match (context.cache_tracker, context.cache_profile) {
@@ -1685,6 +1721,12 @@ async fn handle_non_stream_request(
             "usage": usage
         })
     };
+
+    // 记录请求追踪
+    if let (Some(t), Some(db)) = (trace, trace_db.as_ref()) {
+        let record = t.finish(200, Some(billed_input_tokens), Some(output_tokens), None);
+        db.record(record).await;
+    }
 
     (StatusCode::OK, Json(response_body)).into_response()
 }

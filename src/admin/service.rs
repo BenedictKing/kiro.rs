@@ -49,6 +49,7 @@ pub struct AdminService {
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
     known_endpoints: HashSet<String>,
+    trace_db: Option<Arc<super::trace_db::TraceDb>>,
 }
 
 impl AdminService {
@@ -79,7 +80,14 @@ impl AdminService {
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
+            trace_db: None,
         }
+    }
+
+    /// 设置 TraceDb
+    pub fn with_trace_db(mut self, trace_db: Arc<super::trace_db::TraceDb>) -> Self {
+        self.trace_db = Some(trace_db);
+        self
     }
 
     /// 获取所有凭据状态
@@ -1043,12 +1051,22 @@ impl AdminService {
     /// 获取请求日志（需要 TraceDb）
     pub fn get_request_logs(
         &self,
-        trace_db: &super::trace_db::TraceDb,
         limit: u32,
         before_ts_epoch: Option<i64>,
         status_filter: Option<i32>,
         credential_filter: Option<u64>,
     ) -> serde_json::Value {
+        let trace_db = match &self.trace_db {
+            Some(db) => db,
+            None => {
+                return serde_json::json!({
+                    "items": [],
+                    "total": 0,
+                    "error": "请求日志功能未启用（TraceDb 未初始化）",
+                });
+            }
+        };
+
         match trace_db.query_logs(limit, before_ts_epoch, status_filter, credential_filter) {
             Ok(logs) => serde_json::json!({
                 "items": logs,

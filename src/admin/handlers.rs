@@ -213,3 +213,26 @@ pub async fn get_stats(State(state): State<AdminState>) -> impl IntoResponse {
 pub async fn get_cooldowns(State(state): State<AdminState>) -> impl IntoResponse {
     Json(state.service.get_cooldown_statuses())
 }
+
+/// GET /api/admin/request-logs - 获取请求日志
+pub async fn get_request_logs(
+    State(state): State<AdminState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(100)
+        .min(500);
+    let before = params
+        .get("before")
+        .and_then(|v| v.parse::<i64>().ok());
+    let status = params
+        .get("status")
+        .and_then(|v| v.parse::<i32>().ok());
+    let credential = params
+        .get("credential_id")
+        .and_then(|v| v.parse::<u64>().ok());
+
+    Json(state.service.get_request_logs(limit, before, status, credential))
+}
