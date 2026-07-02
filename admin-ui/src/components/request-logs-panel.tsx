@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { FileText, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -27,6 +27,12 @@ function formatTimestamp(ts: string): string {
   }
 }
 
+function parsePositiveInt(value: string): number | undefined {
+  if (!/^\d+$/.test(value.trim())) return undefined
+  const parsed = parseInt(value, 10)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
 function StatusBadge({ status }: { status: number }) {
   const variant = status >= 200 && status < 300
     ? 'default'
@@ -39,13 +45,14 @@ function StatusBadge({ status }: { status: number }) {
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
   const colorMap: Record<string, string> = {
-    Success: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-    QuotaExhausted: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-    AccountThrottled: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200',
-    AuthFailed: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-    Transient: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-    NetworkError: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200',
-    BadRequest: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
+    success: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+    quota_exhausted: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+    account_throttled: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200',
+    auth_failed: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+    transient: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+    network_error: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200',
+    bad_request: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
+    stream_interrupted: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200',
   }
 
   const cls = colorMap[outcome] || 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200'
@@ -75,7 +82,7 @@ function LogRow({ log }: { log: RequestLogItem }) {
           {formatTimestamp(log.ts)}
         </span>
         <StatusBadge status={log.finalStatus} />
-        <span className="font-mono text-xs truncate flex-1">{log.model}</span>
+        <span className="font-mono text-xs truncate flex-1">{log.model || '-'}</span>
         <span className="text-xs text-muted-foreground shrink-0">
           {log.isStream ? '流式' : '非流式'}
         </span>
@@ -96,17 +103,24 @@ function LogRow({ log }: { log: RequestLogItem }) {
             </div>
             <div>
               <span className="text-muted-foreground">输入 Tokens：</span>
-              <span>{log.inputTokens.toLocaleString()}</span>
+              <span>{log.inputTokens?.toLocaleString() ?? '-'}</span>
             </div>
             <div>
               <span className="text-muted-foreground">输出 Tokens：</span>
-              <span>{log.outputTokens.toLocaleString()}</span>
+              <span>{log.outputTokens?.toLocaleString() ?? '-'}</span>
             </div>
             <div>
               <span className="text-muted-foreground">尝试次数：</span>
-              <span>{log.attempts.length}</span>
+              <span>{log.totalAttempts}</span>
             </div>
           </div>
+
+          {log.error && (
+            <div className="text-xs text-red-500 break-all">
+              <span className="text-muted-foreground">错误：</span>
+              {log.error}
+            </div>
+          )}
 
           {log.attempts.length > 0 && (
             <div className="space-y-1">
@@ -140,34 +154,57 @@ export function RequestLogsPanel() {
   const [statusFilter, setStatusFilter] = useState<string>('')
   const [credentialFilter, setCredentialFilter] = useState<string>('')
   const [limit, setLimit] = useState(50)
+  const [cursorStack, setCursorStack] = useState<number[]>([])
+
+  const status = useMemo(() => parsePositiveInt(statusFilter), [statusFilter])
+  const credentialId = useMemo(() => parsePositiveInt(credentialFilter), [credentialFilter])
+  const before = cursorStack[cursorStack.length - 1]
+  const statusInvalid = statusFilter.trim() !== '' && status === undefined
+  const credentialInvalid = credentialFilter.trim() !== '' && credentialId === undefined
 
   const { data, isLoading, refetch } = useRequestLogs({
     limit,
-    status: statusFilter ? parseInt(statusFilter, 10) : undefined,
-    credentialId: credentialFilter ? parseInt(credentialFilter, 10) : undefined,
+    before,
+    status,
+    credentialId,
+    enabled: !statusInvalid && !credentialInvalid,
   })
 
   const logs = data?.items || []
+  const hasNextPage = logs.length === limit && (data?.total ?? 0) > cursorStack.length * limit + logs.length
+
+  const resetPagination = () => setCursorStack([])
 
   return (
     <div className="space-y-4">
       {/* 筛选栏 */}
       <div className="flex items-center gap-3 flex-wrap">
         <Input
+          inputMode="numeric"
           placeholder="状态码筛选 (如 200, 429)"
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="w-40 h-8 text-sm"
+          onChange={(e) => {
+            setStatusFilter(e.target.value)
+            resetPagination()
+          }}
+          className={`w-40 h-8 text-sm ${statusInvalid ? 'border-destructive' : ''}`}
         />
         <Input
+          inputMode="numeric"
           placeholder="凭据 ID"
           value={credentialFilter}
-          onChange={(e) => setCredentialFilter(e.target.value)}
-          className="w-32 h-8 text-sm"
+          onChange={(e) => {
+            setCredentialFilter(e.target.value)
+            resetPagination()
+          }}
+          className={`w-32 h-8 text-sm ${credentialInvalid ? 'border-destructive' : ''}`}
         />
         <select
           value={limit}
-          onChange={(e) => setLimit(parseInt(e.target.value, 10))}
+          onChange={(e) => {
+            setLimit(parseInt(e.target.value, 10))
+            resetPagination()
+          }}
           className="flex h-8 rounded-md border border-input bg-background px-2 py-1 text-sm"
         >
           <option value={20}>20 条</option>
@@ -175,13 +212,16 @@ export function RequestLogsPanel() {
           <option value={100}>100 条</option>
           <option value={200}>200 条</option>
         </select>
-        <Button variant="outline" size="sm" onClick={() => refetch()}>
+        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={statusInvalid || credentialInvalid}>
           <RefreshCw className="h-4 w-4 mr-1" />
           刷新
         </Button>
         <span className="text-xs text-muted-foreground">
           共 {data?.total || 0} 条记录
         </span>
+        {(statusInvalid || credentialInvalid) && (
+          <span className="text-xs text-destructive">筛选条件必须是数字</span>
+        )}
       </div>
 
       {/* 日志列表 */}
@@ -202,11 +242,37 @@ export function RequestLogsPanel() {
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-2">
-          {logs.map((log) => (
-            <LogRow key={log.id} log={log} />
-          ))}
-        </div>
+        <>
+          <div className="space-y-2">
+            {logs.map((log) => (
+              <LogRow key={log.id} log={log} />
+            ))}
+          </div>
+          <div className="flex justify-center items-center gap-4 mt-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCursorStack((stack) => stack.slice(0, -1))}
+              disabled={cursorStack.length === 0}
+            >
+              上一页
+            </Button>
+            <span className="text-sm text-muted-foreground">
+              第 {cursorStack.length + 1} 页
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const last = logs[logs.length - 1]
+                if (last) setCursorStack((stack) => [...stack, last.tsEpoch])
+              }}
+              disabled={!hasNextPage}
+            >
+              下一页
+            </Button>
+          </div>
+        </>
       )}
     </div>
   )

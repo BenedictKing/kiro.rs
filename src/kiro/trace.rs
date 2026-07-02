@@ -155,12 +155,41 @@ impl RequestTrace {
 }
 
 impl TraceRecord {
-    /// 截断错误信息到 300 字符
+    /// 截断错误信息到 300 字节（按字符边界安全截断，避免多字节字符切割 panic）
     pub fn truncate_error(error: &str) -> String {
         if error.len() <= 300 {
             error.to_string()
         } else {
-            format!("{}...", &error[..297])
+            let end = crate::common::utf8::floor_char_boundary(error, 297);
+            format!("{}...", &error[..end])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_error_short() {
+        assert_eq!(TraceRecord::truncate_error("短错误"), "短错误");
+    }
+
+    #[test]
+    fn test_truncate_error_long_ascii() {
+        let long = "e".repeat(400);
+        let result = TraceRecord::truncate_error(&long);
+        assert_eq!(result.len(), 300);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_error_multibyte_no_panic() {
+        // 中文每字 3 字节，297 不是 3 的倍数时必然切在字符中间
+        let long = "凭证已过期或无效".repeat(30);
+        assert!(long.len() > 300);
+        let result = TraceRecord::truncate_error(&long);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 300);
     }
 }

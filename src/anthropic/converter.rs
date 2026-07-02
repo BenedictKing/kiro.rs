@@ -158,12 +158,18 @@ const KIRO_MODEL_HAIKU_4_5: &str = "claude-haiku-4.5";
 
 /// 统一后缀剥离：-thinking / -agentic / [1m]
 fn normalize_model_name(model: &str) -> String {
-    let model = model.to_lowercase();
-    let model = model.strip_suffix("-thinking").unwrap_or(&model);
-    let model = model.strip_suffix("-agentic").unwrap_or(model);
-    // [1m] 后缀仅影响上下文窗口宣传，不改变模型映射
-    let model = model.strip_suffix("[1m]").unwrap_or(model);
-    model.to_string()
+    let mut model = model.to_lowercase();
+    // 客户端可能把 [1m] 放在 -thinking/-agentic 之前或之后，循环剥离直到稳定。
+    loop {
+        let next = model
+            .strip_suffix("[1m]")
+            .or_else(|| model.strip_suffix("-thinking"))
+            .or_else(|| model.strip_suffix("-agentic"));
+        match next {
+            Some(stripped) => model = stripped.to_string(),
+            None => return model,
+        }
+    }
 }
 
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
@@ -3330,8 +3336,8 @@ mod tests {
         assert_eq!(normalize_model_name("claude-sonnet-5[1m]"), "claude-sonnet-5");
         // -thinking 在尾部时先剥离，[1m] 随后剥离
         assert_eq!(normalize_model_name("claude-fable-5[1m]-thinking"), "claude-fable-5");
-        // [1m] 在 -thinking 之后：先尝试 strip -thinking 失败（尾部是 [1m]），再 strip [1m]
-        assert_eq!(normalize_model_name("claude-opus-4-7-thinking[1m]"), "claude-opus-4-7-thinking");
+        // [1m] 在 -thinking 之后也应完整剥离
+        assert_eq!(normalize_model_name("claude-opus-4-7-thinking[1m]"), "claude-opus-4-7");
         // [1m] 在中间，不在尾部：不剥离
         assert_eq!(normalize_model_name("claude-sonnet-5[1m]-agentic"), "claude-sonnet-5");
     }

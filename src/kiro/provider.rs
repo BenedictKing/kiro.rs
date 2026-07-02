@@ -187,6 +187,11 @@ impl KiroProvider {
         &self.token_manager
     }
 
+    /// 获取 token_manager 的 Arc 克隆（用于移入异步流等长生命周期场景）
+    pub fn token_manager_arc(&self) -> Arc<MultiTokenManager> {
+        Arc::clone(&self.token_manager)
+    }
+
     /// 后台异步刷新余额缓存（如果需要）
     fn spawn_balance_refresh(&self, id: u64) {
         // 检查缓存是否需要刷新

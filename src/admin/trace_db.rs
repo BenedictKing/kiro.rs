@@ -18,9 +18,11 @@ const CHANNEL_CAPACITY: usize = 4096;
 
 /// 请求日志摘要（用于列表查询）
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RequestLogSummary {
     pub id: i64,
     pub ts: String,
+    pub ts_epoch: i64,
     pub path: String,
     pub model: Option<String>,
     pub is_stream: bool,
@@ -36,6 +38,7 @@ pub struct RequestLogSummary {
 
 /// 重试尝试摘要
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AttemptSummary {
     pub try_number: i32,
     pub credential_id: u64,
@@ -222,7 +225,7 @@ impl TraceDb {
 
         // 动态构建查询
         let mut sql = String::from(
-            "SELECT id, ts, path, model, is_stream, final_status, final_credential_id,
+            "SELECT id, ts, ts_epoch, path, model, is_stream, final_status, final_credential_id,
              duration_ms, input_tokens, output_tokens, total_attempts, error
              FROM request_logs WHERE 1=1",
         );
@@ -259,16 +262,17 @@ impl TraceDb {
             .query_map(params_ref.as_slice(), |row| {
                 let id: i64 = row.get(0)?;
                 let ts: String = row.get(1)?;
-                let path: String = row.get(2)?;
-                let model: Option<String> = row.get(3)?;
-                let is_stream: i32 = row.get(4)?;
-                let final_status: i32 = row.get(5)?;
-                let final_credential_id: i64 = row.get(6)?;
-                let duration_ms: i64 = row.get(7)?;
-                let input_tokens: Option<i32> = row.get(8)?;
-                let output_tokens: Option<i32> = row.get(9)?;
-                let total_attempts: i32 = row.get(10)?;
-                let error: Option<String> = row.get(11)?;
+                let ts_epoch: i64 = row.get(2)?;
+                let path: String = row.get(3)?;
+                let model: Option<String> = row.get(4)?;
+                let is_stream: i32 = row.get(5)?;
+                let final_status: i32 = row.get(6)?;
+                let final_credential_id: i64 = row.get(7)?;
+                let duration_ms: i64 = row.get(8)?;
+                let input_tokens: Option<i32> = row.get(9)?;
+                let output_tokens: Option<i32> = row.get(10)?;
+                let total_attempts: i32 = row.get(11)?;
+                let error: Option<String> = row.get(12)?;
 
                 // 查询 attempts
                 let attempts = Self::query_attempts(&conn, id).unwrap_or_default();
@@ -276,6 +280,7 @@ impl TraceDb {
                 Ok(RequestLogSummary {
                     id,
                     ts,
+                    ts_epoch,
                     path,
                     model,
                     is_stream: is_stream != 0,
@@ -312,6 +317,39 @@ impl TraceDb {
             })
         })?
         .collect()
+    }
+
+    /// 查询符合筛选条件的日志总数（不受分页游标和 limit 影响）
+    pub fn count_logs(
+        &self,
+        status_filter: Option<i32>,
+        credential_filter: Option<u64>,
+    ) -> anyhow::Result<usize> {
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+
+        let mut sql = String::from("SELECT COUNT(*) FROM request_logs WHERE 1=1");
+        if status_filter.is_some() {
+            sql.push_str(" AND final_status = ?");
+        }
+        if credential_filter.is_some() {
+            sql.push_str(" AND final_credential_id = ?");
+        }
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(s) = status_filter {
+            param_values.push(Box::new(s));
+        }
+        if let Some(c) = credential_filter {
+            param_values.push(Box::new(c as i64));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let count: i64 = conn.query_row(&sql, params_ref.as_slice(), |row| row.get(0))?;
+        Ok(count as usize)
     }
 
     /// 清理过期日志

@@ -194,20 +194,33 @@ async fn main() {
     )));
 
     // 初始化请求日志数据库（SQLite WAL 模式）
-    let trace_db = token_manager.cache_dir().map(|dir| {
+    let trace_db = token_manager.cache_dir().and_then(|dir| {
         let db_path = dir.join("request_logs.db");
         match admin::trace_db::TraceDb::new(db_path) {
             Ok(db) => {
                 tracing::info!("请求日志数据库已初始化");
-                Arc::new(db)
+                Some(Arc::new(db))
             }
             Err(e) => {
                 tracing::warn!("初始化请求日志数据库失败（日志功能已禁用）: {}", e);
-                // 创建一个空的 TraceDb 但不实际使用
-                Arc::new(admin::trace_db::TraceDb::new(dir.join("request_logs.db")).unwrap())
+                None
             }
         }
     });
+
+    // 启动请求日志定期清理任务（每 6 小时按保留天数清理过期日志）
+    if let Some(ref db) = trace_db {
+        let cleanup_db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                interval.tick().await;
+                if let Err(e) = cleanup_db.cleanup() {
+                    tracing::warn!("清理过期请求日志失败: {}", e);
+                }
+            }
+        });
+    }
 
     // 构建 Anthropic API 路由（从第一个凭据获取 profile_arn）
     let anthropic_app = anthropic::create_router_with_provider(

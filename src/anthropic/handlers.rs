@@ -445,6 +445,28 @@ fn adaptive_shrink_request_body(
     Ok(Some(outcome))
 }
 
+fn status_for_kiro_provider_error(err: &Error) -> StatusCode {
+    if is_input_too_long_error(err) || is_improperly_formed_request_error(err) {
+        return StatusCode::BAD_REQUEST;
+    }
+    if is_no_credentials_error(err) {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    if is_all_credentials_cooling_down_error(err).0 || is_quota_exhausted_error(err) {
+        return StatusCode::TOO_MANY_REQUESTS;
+    }
+    if is_transient_upstream_error(err) {
+        let err_str = err.to_string().to_lowercase();
+        if is_network_error(&err_str) {
+            StatusCode::BAD_GATEWAY
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+    } else {
+        StatusCode::BAD_GATEWAY
+    }
+}
+
 fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Response {
     if is_input_too_long_error(&err) {
         tracing::warn!(
@@ -1277,7 +1299,12 @@ async fn handle_stream_request(
         Err(e) => {
             // 记录失败的 trace
             if let (Some(t), Some(db)) = (trace, trace_db.as_ref()) {
-                let record = t.finish(502, None, None, Some(e.to_string()));
+                let record = t.finish(
+                    status_for_kiro_provider_error(&e).as_u16() as i32,
+                    None,
+                    None,
+                    Some(e.to_string()),
+                );
                 db.record(record).await;
             }
             return map_kiro_provider_error_to_response(context.request_body, e);
@@ -1328,8 +1355,13 @@ async fn handle_stream_request(
         db.record(record).await;
     }
 
-    // 创建 SSE 流
-    let stream = create_sse_stream(api_result.response, ctx, initial_events);
+    // 创建 SSE 流（流结束时记录凭据级 token 用量统计）
+    let usage_sink = Some(UsageSink {
+        token_manager: provider.token_manager_arc(),
+        credential_id: api_result.credential_id,
+        input_tokens: context.input_tokens,
+    });
+    let stream = create_sse_stream(api_result.response, ctx, initial_events, usage_sink);
 
     // 返回 SSE 响应
     Response::builder()
@@ -1350,10 +1382,18 @@ fn create_ping_sse() -> Bytes {
 }
 
 /// 创建 SSE 事件流
+/// 流结束时的 token 用量统计接收器
+struct UsageSink {
+    token_manager: std::sync::Arc<crate::kiro::token_manager::MultiTokenManager>,
+    credential_id: u64,
+    input_tokens: i32,
+}
+
 fn create_sse_stream(
     response: reqwest::Response,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
+    usage_sink: Option<UsageSink>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -1368,8 +1408,8 @@ fn create_sse_stream(
     let ping_interval = interval_at(Instant::now() + ping_period, ping_period);
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, ping_interval),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        (body_stream, ctx, EventStreamDecoder::new(), false, ping_interval, usage_sink),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, mut usage_sink)| async move {
             if finished {
                 return None;
             }
@@ -1406,26 +1446,40 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, usage_sink)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
                             // 发送最终事件并结束
                             let final_events = ctx.generate_final_events();
+                            if let Some(sink) = usage_sink.take() {
+                                sink.token_manager.record_token_usage(
+                                    sink.credential_id,
+                                    sink.input_tokens.max(0) as u64,
+                                    ctx.output_tokens.max(0) as u64,
+                                );
+                            }
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, usage_sink)))
                         }
                         None => {
                             // 流结束，发送最终事件
                             let final_events = ctx.generate_final_events();
+                            if let Some(sink) = usage_sink.take() {
+                                sink.token_manager.record_token_usage(
+                                    sink.credential_id,
+                                    sink.input_tokens.max(0) as u64,
+                                    ctx.output_tokens.max(0) as u64,
+                                );
+                            }
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, usage_sink)))
                         }
                     }
                 }
@@ -1433,7 +1487,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, usage_sink)))
                 }
             }
         },
@@ -1465,7 +1519,12 @@ async fn handle_non_stream_request(
         Err(e) => {
             // 记录失败的 trace
             if let (Some(t), Some(db)) = (trace, trace_db.as_ref()) {
-                let record = t.finish(502, None, None, Some(e.to_string()));
+                let record = t.finish(
+                    status_for_kiro_provider_error(&e).as_u16() as i32,
+                    None,
+                    None,
+                    Some(e.to_string()),
+                );
                 db.record(record).await;
             }
             return map_kiro_provider_error_to_response(context.request_body, e);
@@ -1728,6 +1787,13 @@ async fn handle_non_stream_request(
         db.record(record).await;
     }
 
+    // 累计凭据级 token 用量统计
+    provider.token_manager().record_token_usage(
+        api_result.credential_id,
+        billed_input_tokens.max(0) as u64,
+        output_tokens.max(0) as u64,
+    );
+
     (StatusCode::OK, Json(response_body)).into_response()
 }
 
@@ -1749,18 +1815,21 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
+    // Claude Code 可能把 [1m] 放在 thinking 后缀之后，匹配 thinking 预算前先剥离展示后缀。
+    let model_for_suffix = model_lower.strip_suffix("[1m]").unwrap_or(&model_lower);
+
     // 具体后缀必须在通用 "thinking" 之前匹配
-    let budget_tokens = if model_lower.ends_with("-thinking-minimal") {
+    let budget_tokens = if model_for_suffix.ends_with("-thinking-minimal") {
         512
-    } else if model_lower.ends_with("-thinking-low") {
+    } else if model_for_suffix.ends_with("-thinking-low") {
         1024
-    } else if model_lower.ends_with("-thinking-medium") {
+    } else if model_for_suffix.ends_with("-thinking-medium") {
         8192
-    } else if model_lower.ends_with("-thinking-high") {
+    } else if model_for_suffix.ends_with("-thinking-high") {
         24576
-    } else if model_lower.ends_with("-thinking-xhigh") {
+    } else if model_for_suffix.ends_with("-thinking-xhigh") {
         32768
-    } else if model_lower.ends_with("-thinking") {
+    } else if model_for_suffix.ends_with("-thinking") {
         20000
     } else {
         // "thinking" 出现在模型名中但不是后缀（如 "thinking-model-v2"），不覆写

@@ -410,20 +410,23 @@ export interface RequestAttempt {
   statusCode: number
   outcome: string
   durationMs: number
-  error?: string
+  error?: string | null
 }
 
 export interface RequestLogItem {
   id: number
   ts: string
+  tsEpoch: number
   path: string
-  model: string
+  model: string | null
   isStream: boolean
   finalStatus: number
   finalCredentialId: number
   durationMs: number
-  inputTokens: number
-  outputTokens: number
+  inputTokens: number | null
+  outputTokens: number | null
+  totalAttempts: number
+  error?: string | null
   attempts: RequestAttempt[]
 }
 

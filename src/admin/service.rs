@@ -1070,10 +1070,15 @@ impl AdminService {
         };
 
         match trace_db.query_logs(limit, before_ts_epoch, status_filter, credential_filter) {
-            Ok(logs) => serde_json::json!({
-                "items": logs,
-                "total": logs.len(),
-            }),
+            Ok(logs) => {
+                let total = trace_db
+                    .count_logs(status_filter, credential_filter)
+                    .unwrap_or(logs.len());
+                serde_json::json!({
+                    "items": logs,
+                    "total": total,
+                })
+            }
             Err(e) => serde_json::json!({
                 "items": [],
                 "total": 0,
