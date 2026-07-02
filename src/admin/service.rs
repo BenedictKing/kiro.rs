@@ -115,6 +115,8 @@ impl AdminService {
                     email: entry.email,
                     subscription_title: entry.subscription_title,
                     success_count: entry.success_count,
+                    total_failure_count: entry.total_failure_count,
+                    daily_count: entry.daily_count,
                     last_used_at: entry.last_used_at.clone(),
                     region: entry.region,
                     api_region: entry.api_region,

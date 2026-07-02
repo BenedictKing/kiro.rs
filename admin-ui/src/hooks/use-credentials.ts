@@ -21,6 +21,9 @@ import {
   updateProxyConfig,
   getGlobalConfig,
   updateGlobalConfig,
+  getGlobalStats,
+  getCooldowns,
+  getRequestLogs,
 } from '@/api/credentials'
 import type { AddCredentialRequest, ImportTokenJsonRequest, UpdateGlobalConfigRequest } from '@/types/api'
 
@@ -249,5 +252,39 @@ export function useUpdateGlobalConfig() {
     onError: (error: any) => {
       toast.error(error.response?.data?.error?.message || '更新失败')
     },
+  })
+}
+
+// 查询全局统计
+export function useGlobalStats() {
+  return useQuery({
+    queryKey: ['globalStats'],
+    queryFn: getGlobalStats,
+    refetchInterval: 30000,
+  })
+}
+
+// 查询冷却状态
+export function useCooldowns() {
+  return useQuery({
+    queryKey: ['cooldowns'],
+    queryFn: getCooldowns,
+    refetchInterval: 10000,
+  })
+}
+
+// 查询请求日志
+export function useRequestLogs(params?: {
+  limit?: number
+  before?: number
+  status?: number
+  credentialId?: number
+  enabled?: boolean
+}) {
+  return useQuery({
+    queryKey: ['requestLogs', params],
+    queryFn: () => getRequestLogs(params),
+    enabled: params?.enabled !== false,
+    refetchInterval: 15000,
   })
 }

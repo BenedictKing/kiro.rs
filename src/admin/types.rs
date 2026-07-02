@@ -46,6 +46,10 @@ pub struct CredentialStatusItem {
     pub subscription_title: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
+    /// 累计最终失败次数
+    pub total_failure_count: u64,
+    /// 今日请求量（本地时区日历日）
+    pub daily_count: u32,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 凭据级 Region（用于 Token 刷新）

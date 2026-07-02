@@ -290,11 +290,20 @@ export function CredentialCard({
               <span className={credential.failureCount > 0 ? 'text-red-500 font-medium' : ''}>
                 {credential.failureCount}
               </span>
+              {credential.totalFailureCount > credential.failureCount && (
+                <span className="text-xs text-muted-foreground ml-1">
+                  (累计 {credential.totalFailureCount})
+                </span>
+              )}
               {credential.refreshFailureCount > 0 && (
                 <span className="ml-2 text-amber-600 font-medium">
                   刷新 {credential.refreshFailureCount}
                 </span>
               )}
+            </div>
+            <div>
+              <span className="text-muted-foreground">今日请求：</span>
+              <span className="font-medium">{credential.dailyCount}</span>
             </div>
             <div>
               <span className="text-muted-foreground">订阅等级：</span>
@@ -349,12 +358,6 @@ export function CredentialCard({
                 <span className="text-sm text-muted-foreground ml-1">未知</span>
               )}
             </div>
-            {credential.hasProxy && (
-              <div className="col-span-2">
-                <span className="text-muted-foreground">代理：</span>
-                <span className="font-medium">{credential.proxyUrl}</span>
-              </div>
-            )}
             <div className="col-span-2">
               <span className="text-muted-foreground">Endpoint：</span>
               {editingEndpoint ? (

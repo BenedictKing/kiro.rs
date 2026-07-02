@@ -18,6 +18,9 @@ import type {
   UpdateProxyConfigRequest,
   GlobalConfigResponse,
   UpdateGlobalConfigRequest,
+  GlobalStatsResponse,
+  CooldownsResponse,
+  RequestLogsResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -190,5 +193,35 @@ export async function getGlobalConfig(): Promise<GlobalConfigResponse> {
 // 更新全局配置
 export async function updateGlobalConfig(req: UpdateGlobalConfigRequest): Promise<SuccessResponse> {
   const { data } = await api.put<SuccessResponse>('/config/global', req)
+  return data
+}
+
+// 获取全局统计
+export async function getGlobalStats(): Promise<GlobalStatsResponse> {
+  const { data } = await api.get<GlobalStatsResponse>('/stats')
+  return data
+}
+
+// 获取冷却状态
+export async function getCooldowns(): Promise<CooldownsResponse> {
+  const { data } = await api.get<CooldownsResponse>('/cooldowns')
+  return data
+}
+
+// 获取请求日志
+export async function getRequestLogs(params?: {
+  limit?: number
+  before?: number
+  status?: number
+  credentialId?: number
+}): Promise<RequestLogsResponse> {
+  const searchParams = new URLSearchParams()
+  if (params?.limit) searchParams.set('limit', String(params.limit))
+  if (params?.before) searchParams.set('before', String(params.before))
+  if (params?.status) searchParams.set('status', String(params.status))
+  if (params?.credentialId) searchParams.set('credential_id', String(params.credentialId))
+  const qs = searchParams.toString()
+  const url = qs ? `/request-logs?${qs}` : '/request-logs'
+  const { data } = await api.get<RequestLogsResponse>(url)
   return data
 }

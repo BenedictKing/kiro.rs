@@ -16,34 +16,20 @@ export interface CredentialStatusItem {
   expiresAt: string | null
   authMethod: string | null
   hasProfileArn: boolean
-  accountEmail: string | null
-  email?: string
   refreshTokenHash?: string
+  email?: string
   subscriptionTitle?: string | null
 
-  // ===== 统计（可持久化） =====
-  callsTotal: number
-  callsOk: number
-  callsErr: number
-  inputTokensTotal: number
-  outputTokensTotal: number
-  lastCallAt: string | null
-  lastSuccessAt: string | null
-  lastErrorAt: string | null
-  lastError: string | null
-
-  // ===== upstream 字段 =====
+  // ===== 统计 =====
   successCount: number
+  totalFailureCount: number
+  dailyCount: number
   lastUsedAt: string | null
-  hasProxy: boolean
-  proxyUrl?: string
-  /** 凭据级 Region（用于 Token 刷新） */
+
+  // ===== 凭据级配置 =====
   region: string | null
-  /** 凭据级 API Region（单独覆盖 API 请求） */
   apiRegion: string | null
-  /** 凭据显式配置的 endpoint，null 表示回退默认值 */
   endpoint?: string | null
-  /** 最终生效的 endpoint */
   effectiveEndpoint: string
 }
 
@@ -385,4 +371,64 @@ export interface UpdateGlobalConfigRequest {
   promptCacheAccountingEnabled?: boolean
   defaultEndpoint?: string
   compression?: UpdateCompressionConfigRequest
+}
+
+// ============ 全局统计 ============
+
+export interface GlobalStatsResponse {
+  totalCredentials: number
+  availableCredentials: number
+  totalRequests: number
+  successRequests: number
+  failedRequests: number
+  todayRequests: number
+  totalInputTokens: number
+  totalOutputTokens: number
+}
+
+// ============ 冷却状态 ============
+
+export interface CooldownItem {
+  credentialId: number
+  email: string
+  reason: string
+  remainingMs: number
+  remainingSecs: number
+  triggerCount: number
+}
+
+export interface CooldownsResponse {
+  cooldowns: CooldownItem[]
+  total: number
+}
+
+// ============ 请求日志 ============
+
+export interface RequestAttempt {
+  tryNumber: number
+  credentialId: number
+  statusCode: number
+  outcome: string
+  durationMs: number
+  error?: string
+}
+
+export interface RequestLogItem {
+  id: number
+  ts: string
+  path: string
+  model: string
+  isStream: boolean
+  finalStatus: number
+  finalCredentialId: number
+  durationMs: number
+  inputTokens: number
+  outputTokens: number
+  attempts: RequestAttempt[]
+}
+
+export interface RequestLogsResponse {
+  items: RequestLogItem[]
+  total: number
+  error?: string
 }
