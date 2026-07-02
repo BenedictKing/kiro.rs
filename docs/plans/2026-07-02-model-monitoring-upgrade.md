@@ -193,7 +193,7 @@ struct StatsEntry {
 - 现有 `CredentialStatsResponse` 前端类型已定义 `byDay` / `byModel` 数组（空架子），本期由 SQLite 聚合真正产出
 - 所有端点走现有 admin 认证中间件（adminApiKey）
 
-## 3. P2 — 展示层（消费 P1 数据）
+## 3. P2 — 展示层（消费 P1 数据） ✅ 已完成
 
 ### 3.1 4 Tab 布局重构
 
@@ -251,7 +251,7 @@ struct StatsEntry {
 - **失败率**：`failure_count / (success_count + failure_count)`，>10% 黄色、>30% 红色
 - cooldown reason 的中文映射：`RateLimitExceeded → 限流冷却`、`QuotaExhausted → 配额耗尽`、`AccountSuspended → 账号暂停` 等
 
-## 4. P3 — 健壮性（Converter 增强）
+## 4. P3 — 健壮性（Converter 增强） ✅ 已存在（无需额外实现）
 
 从 kiro.rs-upstream 移植（均已在上游验证）：
 
@@ -329,13 +329,13 @@ struct StatsEntry {
   ├── cooldown.rs 长冷却持久化
   └── Admin API 四端点
 
-阶段 3（P2 展示层）           约 2 天
+阶段 3（P2 展示层）           ✅ 已完成
   ├── dashboard.tsx 拆分 4 Tab（纯重构提交）
   ├── 请求日志 Tab + Collapsible 明细
   ├── 统计概览 Tab + 趋势图
   └── 凭据卡片冷却倒计时/统计增强
 
-阶段 4（P3 健壮性）           约 1 天
+阶段 4（P3 健壮性）           ✅ 已存在
   └── upstream Converter 增强移植（对比去重后）
 
 总计约 6 个工作日；每阶段独立可交付、可单独验证。
