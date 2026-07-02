@@ -635,6 +635,118 @@ pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
     );
 
     let models = vec![
+        // Sonnet 5（always-1M，最新一代）
+        Model {
+            id: "claude-sonnet-5".to_string(),
+            object: "model".to_string(),
+            created: 1782940800,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(64_000),
+            thinking: Some(true),
+        },
+        Model {
+            id: "claude-sonnet-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1782940800,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(64_000),
+            thinking: Some(true),
+        },
+        Model {
+            id: "claude-sonnet-5-agentic".to_string(),
+            object: "model".to_string(),
+            created: 1782940800,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5 (Agentic)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(64_000),
+            thinking: Some(true),
+        },
+        // Fable 5（always-1M，直通预留）
+        Model {
+            id: "claude-fable-5".to_string(),
+            object: "model".to_string(),
+            created: 1782940800,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Fable 5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(64_000),
+            thinking: Some(true),
+        },
+        Model {
+            id: "claude-fable-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1782940800,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Fable 5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(64_000),
+            thinking: Some(true),
+        },
+        Model {
+            id: "claude-fable-5-agentic".to_string(),
+            object: "model".to_string(),
+            created: 1782940800,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Fable 5 (Agentic)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(64_000),
+            thinking: Some(true),
+        },
+        // Opus 4.8（always-1M）
+        Model {
+            id: "claude-opus-4-8".to_string(),
+            object: "model".to_string(),
+            created: 1780089600,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 4.8".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(128_000),
+            thinking: Some(true),
+        },
+        Model {
+            id: "claude-opus-4-8-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1780089600,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 4.8 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(128_000),
+            thinking: Some(true),
+        },
+        Model {
+            id: "claude-opus-4-8-agentic".to_string(),
+            object: "model".to_string(),
+            created: 1780089600,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 4.8 (Agentic)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 32000,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(128_000),
+            thinking: Some(true),
+        },
+        // Sonnet 4.6（always-1M）
         Model {
             id: "claude-sonnet-4-6".to_string(),
             object: "model".to_string(),
@@ -1187,6 +1299,11 @@ async fn handle_stream_request(
         context.tool_name_map,
     );
 
+    // 修正响应模型 ID：always-1M 模型在响应中补 [1m] 后缀（Claude Code 依赖此字段判断上下文窗口）
+    if let Some(kiro_id) = super::converter::map_model(context.model) {
+        ctx.model = super::converter::format_response_model_id(context.model, &kiro_id);
+    }
+
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
 
@@ -1553,12 +1670,16 @@ async fn handle_non_stream_request(
             inject_cache_usage_fields(&mut usage, cache_context);
         }
 
+        let response_model = super::converter::map_model(context.model)
+            .map(|kiro_id| super::converter::format_response_model_id(context.model, &kiro_id))
+            .unwrap_or_else(|| context.model.to_string());
+
         json!({
             "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
             "type": "message",
             "role": "assistant",
             "content": content,
-            "model": context.model,
+            "model": response_model,
             "stop_reason": stop_reason,
             "stop_sequence": null,
             "usage": usage
@@ -1604,10 +1725,9 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     };
 
-    let is_opus_or_sonnet_4_6 = (model_lower.contains("opus") || model_lower.contains("sonnet"))
-        && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let supports_adaptive = super::converter::supports_adaptive_thinking(&payload.model);
 
-    let thinking_type = if is_opus_or_sonnet_4_6 {
+    let thinking_type = if supports_adaptive {
         "adaptive"
     } else {
         "enabled"
@@ -1625,7 +1745,7 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         budget_tokens,
     });
 
-    if is_opus_or_sonnet_4_6 {
+    if supports_adaptive {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
         });

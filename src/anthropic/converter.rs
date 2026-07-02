@@ -147,30 +147,45 @@ fn count_images_in_content(content: &serde_json::Value) -> usize {
 /// Kiro 上游使用的规范模型 ID
 const KIRO_MODEL_SONNET_4_5: &str = "claude-sonnet-4.5";
 const KIRO_MODEL_SONNET_4_6: &str = "claude-sonnet-4.6";
+const KIRO_MODEL_SONNET_4_8: &str = "claude-sonnet-4.8";
+const KIRO_MODEL_SONNET_5: &str = "claude-sonnet-5";
 const KIRO_MODEL_OPUS_4_5: &str = "claude-opus-4.5";
 const KIRO_MODEL_OPUS_4_6: &str = "claude-opus-4.6";
 const KIRO_MODEL_OPUS_4_7: &str = "claude-opus-4.7";
+const KIRO_MODEL_OPUS_4_8: &str = "claude-opus-4.8";
+const KIRO_MODEL_FABLE_5: &str = "claude-fable-5";
 const KIRO_MODEL_HAIKU_4_5: &str = "claude-haiku-4.5";
 
+/// 统一后缀剥离：-thinking / -agentic / [1m]
 fn normalize_model_name(model: &str) -> String {
     let model = model.to_lowercase();
     let model = model.strip_suffix("-thinking").unwrap_or(&model);
     let model = model.strip_suffix("-agentic").unwrap_or(model);
+    // [1m] 后缀仅影响上下文窗口宣传，不改变模型映射
+    let model = model.strip_suffix("[1m]").unwrap_or(model);
     model.to_string()
 }
 
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
 /// 映射规则：
-/// - sonnet 且包含 4.6/4-6 → claude-sonnet-4.6，否则 → claude-sonnet-4.5
-/// - opus 且包含 4.5/4-5 → claude-opus-4.5，包含 4.7/4-7 → claude-opus-4.7，否则 → claude-opus-4.6
+/// - sonnet 且包含 sonnet-5 → claude-sonnet-5，包含 4.8/4-8 → claude-sonnet-4.8，
+///   包含 4.6/4-6 → claude-sonnet-4.6，否则 → claude-sonnet-4.5
+/// - opus 且包含 4.5/4-5 → claude-opus-4.5，包含 4.7/4-7 → claude-opus-4.7，
+///   包含 4.8/4-8 → claude-opus-4.8，否则 → claude-opus-4.6
 /// - 所有 haiku → claude-haiku-4.5
-/// - `-thinking` / `-agentic` 后缀会被剥离后再映射
+/// - 所有 fable → claude-fable-5（直通预留，上游 SKU 待确认）
+/// - `-thinking` / `-agentic` / `[1m]` 后缀会被剥离后再映射
 pub fn map_model(model: &str) -> Option<String> {
     let normalized_model = normalize_model_name(model);
 
     if normalized_model.contains("sonnet") {
-        if normalized_model.contains("4-6") || normalized_model.contains("4.6") {
+        // 从高版本到低版本匹配，"sonnet-5" 不会被 "sonnet-4.5" 误命中
+        if normalized_model.contains("sonnet-5") {
+            Some(KIRO_MODEL_SONNET_5.to_string())
+        } else if normalized_model.contains("4-8") || normalized_model.contains("4.8") {
+            Some(KIRO_MODEL_SONNET_4_8.to_string())
+        } else if normalized_model.contains("4-6") || normalized_model.contains("4.6") {
             Some(KIRO_MODEL_SONNET_4_6.to_string())
         } else {
             Some(KIRO_MODEL_SONNET_4_5.to_string())
@@ -180,11 +195,15 @@ pub fn map_model(model: &str) -> Option<String> {
             Some(KIRO_MODEL_OPUS_4_5.to_string())
         } else if normalized_model.contains("4-7") || normalized_model.contains("4.7") {
             Some(KIRO_MODEL_OPUS_4_7.to_string())
+        } else if normalized_model.contains("4-8") || normalized_model.contains("4.8") {
+            Some(KIRO_MODEL_OPUS_4_8.to_string())
         } else {
             Some(KIRO_MODEL_OPUS_4_6.to_string())
         }
     } else if normalized_model.contains("haiku") {
         Some(KIRO_MODEL_HAIKU_4_5.to_string())
+    } else if normalized_model.contains("fable") {
+        Some(KIRO_MODEL_FABLE_5.to_string())
     } else {
         None
     }
@@ -193,6 +212,102 @@ pub fn map_model(model: &str) -> Option<String> {
 /// 判断模型名是否为 agentic 变体
 pub fn is_agentic_model(model: &str) -> bool {
     model.to_lowercase().ends_with("-agentic")
+}
+
+/// 判断模型是否支持 adaptive thinking（即支持 effort 系统）
+///
+/// 通过 map_model 映射到 Kiro ID 后查询 effort 能力表
+pub fn supports_adaptive_thinking(raw_model: &str) -> bool {
+    map_model(raw_model)
+        .map(|kiro_id| {
+            EFFORT_5_VALUE_MODELS.contains(&kiro_id.as_str())
+                || EFFORT_4_VALUE_MODELS.contains(&kiro_id.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// 判断映射后的 Kiro 模型 ID 是否始终使用 1M 上下文窗口
+///
+/// 依据：kirocc effort.go + kiro-cli 2.10.0 ListAvailableModels schema
+/// - Opus 4.6/4.7/4.8、Sonnet 5、Fable 5 始终 1M（无 200K SKU）
+/// - Sonnet 4.5/4.6、Opus 4.5、Haiku 4.5 为 200K（需 [1m] 后缀才能使用 1M）
+pub fn is_always_1m_model(kiro_model_id: &str) -> bool {
+    matches!(
+        kiro_model_id,
+        KIRO_MODEL_OPUS_4_6
+            | KIRO_MODEL_OPUS_4_7
+            | KIRO_MODEL_OPUS_4_8
+            | KIRO_MODEL_SONNET_5
+            | KIRO_MODEL_FABLE_5
+    )
+}
+
+/// 每模型允许的 effort 集合（权威来源：kirocc effort.go，基于 kiro-cli 2.10.0 schema）
+///
+/// - 5 值（含 xhigh）: opus-4.8, opus-4.7, sonnet-5, fable-5
+/// - 4 值（无 xhigh）: opus-4.6, sonnet-4.6
+/// - 不在表中: 不确定是否支持 effort，采用乐观策略（未知新模型放行）
+const EFFORT_5_VALUE_MODELS: &[&str] = &[
+    KIRO_MODEL_OPUS_4_8,
+    KIRO_MODEL_OPUS_4_7,
+    KIRO_MODEL_SONNET_5,
+    KIRO_MODEL_FABLE_5,
+];
+const EFFORT_4_VALUE_MODELS: &[&str] = &[KIRO_MODEL_OPUS_4_6, KIRO_MODEL_SONNET_4_6];
+
+/// 解析 effort 值并按模型能力归一化
+///
+/// - 无效字符串（拼写错误、"enabled" 等）→ None（丢弃不猜测）
+/// - 模型在已知表中但不支持该级别 → 降级到该模型最高支持级
+/// - 未知新模型 → 乐观放行（返回原值），符合面向未来设计
+pub fn resolve_effort(kiro_model_id: &str, requested: &str) -> Option<String> {
+    let rank = match requested {
+        "low" => 0,
+        "medium" => 1,
+        "high" => 2,
+        "xhigh" => 3,
+        "max" => 4,
+        _ => return None, // 无效值：丢弃不猜测
+    };
+
+    if EFFORT_5_VALUE_MODELS.contains(&kiro_model_id) {
+        // 5 值模型：所有级别都支持
+        Some(requested.to_string())
+    } else if EFFORT_4_VALUE_MODELS.contains(&kiro_model_id) {
+        // 4 值模型：xhigh 降级为 max
+        if rank >= 3 {
+            Some("max".to_string())
+        } else {
+            Some(requested.to_string())
+        }
+    } else if rank <= 4 {
+        // 未知模型（未来型号）：乐观放行
+        Some(requested.to_string())
+    } else {
+        None
+    }
+}
+
+/// 为响应生成正确的 Anthropic 风格模型 ID
+///
+/// 规则（参考 kirocc respconv）：
+/// - always-1M 模型：在响应中补 `[1m]` 后缀，确保 Claude Code 识别 1M 上下文
+/// - 请求中已带 `[1m]` 后缀的：原样保留（不重复追加）
+/// - 其他模型：返回原始请求模型名
+///
+/// # 参数
+/// - `request_model`: 原始请求的 Anthropic 模型名（如 `claude-sonnet-5`）
+/// - `kiro_model_id`: 映射后的 Kiro 模型 ID（如 `claude-sonnet-5`）
+pub fn format_response_model_id(request_model: &str, kiro_model_id: &str) -> String {
+    if !is_always_1m_model(kiro_model_id) {
+        return request_model.to_string();
+    }
+    // 请求已带 [1m] 后缀则原样保留
+    if request_model.to_lowercase().ends_with("[1m]") {
+        return request_model.to_string();
+    }
+    // always-1M 模型补 [1m] 后缀
+    format!("{}[1m]", request_model)
 }
 
 /// 转换结果
@@ -1010,7 +1125,9 @@ fn convert_tools(
 }
 
 /// 生成thinking标签前缀
-fn generate_thinking_prefix(req: &MessagesRequest) -> Option<String> {
+///
+/// `model_id` 为映射后的 Kiro 模型 ID，用于判断模型的 effort 能力级别
+fn generate_thinking_prefix(req: &MessagesRequest, model_id: &str) -> Option<String> {
     if let Some(t) = &req.thinking {
         if t.thinking_type == "enabled" {
             return Some(format!(
@@ -1023,12 +1140,14 @@ fn generate_thinking_prefix(req: &MessagesRequest) -> Option<String> {
                 .as_ref()
                 .map(|c| c.effort.as_str())
                 .unwrap_or("high");
-            // 白名单归一化：仅接受 low/medium/high，非法值回退 high
-            let effort = match raw_effort {
-                "low" | "medium" | "high" => raw_effort,
-                _ => {
-                    tracing::warn!("未知的 thinking effort 值 '{}', 回退为 'high'", raw_effort);
-                    "high"
+            let effort = match resolve_effort(model_id, raw_effort) {
+                Some(e) => e,
+                None => {
+                    tracing::warn!(
+                        "未知或无效的 thinking effort 值 '{}'，回退为 'high'",
+                        raw_effort
+                    );
+                    "high".to_string()
                 }
             };
             return Some(format!(
@@ -1079,7 +1198,7 @@ fn build_history(
     let mut history = Vec::new();
 
     // 生成thinking前缀（如果需要）
-    let thinking_prefix = generate_thinking_prefix(req);
+    let thinking_prefix = generate_thinking_prefix(req, model_id);
 
     // 仅在请求包含 Write/Edit 工具时注入分块写入策略
     let should_inject_chunked_policy = has_write_or_edit_tool(req);
@@ -2743,7 +2862,7 @@ mod tests {
             metadata: None,
         };
 
-        let prefix = generate_thinking_prefix(&req).unwrap();
+        let prefix = generate_thinking_prefix(&req, "claude-sonnet-4.5").unwrap();
         assert!(prefix.contains("<thinking_effort>low</thinking_effort>"));
 
         // 非法值 → 回退 "high"
@@ -2768,7 +2887,7 @@ mod tests {
             metadata: None,
         };
 
-        let prefix = generate_thinking_prefix(&req_invalid).unwrap();
+        let prefix = generate_thinking_prefix(&req_invalid, "claude-sonnet-4.5").unwrap();
         assert!(
             prefix.contains("<thinking_effort>high</thinking_effort>"),
             "非法 effort 值应回退为 high，实际: {}",
@@ -3162,5 +3281,168 @@ mod tests {
             result.assistant_response_message.content.is_empty(),
             "仅 tool_use 时合并阶段不应主动补 '.'"
         );
+    }
+
+    // ===== P0 新模型映射测试 =====
+
+    #[test]
+    fn test_map_model_sonnet_5() {
+        assert_eq!(map_model("claude-sonnet-5"), Some("claude-sonnet-5".to_string()));
+        assert_eq!(map_model("claude-sonnet-5-thinking"), Some("claude-sonnet-5".to_string()));
+        assert_eq!(map_model("claude-sonnet-5-agentic"), Some("claude-sonnet-5".to_string()));
+        assert_eq!(map_model("claude-sonnet-5[1m]"), Some("claude-sonnet-5".to_string()));
+    }
+
+    #[test]
+    fn test_map_model_fable_5() {
+        assert_eq!(map_model("claude-fable-5"), Some("claude-fable-5".to_string()));
+        assert_eq!(map_model("claude-fable-5-thinking"), Some("claude-fable-5".to_string()));
+        assert_eq!(map_model("claude-fable-5-agentic"), Some("claude-fable-5".to_string()));
+        assert_eq!(map_model("claude-fable-5[1m]"), Some("claude-fable-5".to_string()));
+    }
+
+    #[test]
+    fn test_map_model_opus_4_8() {
+        assert_eq!(map_model("claude-opus-4-8"), Some("claude-opus-4.8".to_string()));
+        assert_eq!(map_model("claude-opus-4.8"), Some("claude-opus-4.8".to_string()));
+        assert_eq!(map_model("claude-opus-4-8-thinking"), Some("claude-opus-4.8".to_string()));
+        assert_eq!(map_model("claude-opus-4-8[1m]"), Some("claude-opus-4.8".to_string()));
+    }
+
+    #[test]
+    fn test_map_model_sonnet_4_8() {
+        assert_eq!(map_model("claude-sonnet-4-8"), Some("claude-sonnet-4.8".to_string()));
+        assert_eq!(map_model("claude-sonnet-4.8"), Some("claude-sonnet-4.8".to_string()));
+        assert_eq!(map_model("claude-sonnet-4-8-thinking"), Some("claude-sonnet-4.8".to_string()));
+    }
+
+    #[test]
+    fn test_map_model_sonnet_5_not_confused_with_4_5() {
+        assert_eq!(map_model("claude-sonnet-5"), Some("claude-sonnet-5".to_string()));
+        assert_eq!(map_model("claude-sonnet-4-5"), Some("claude-sonnet-4.5".to_string()));
+        assert_eq!(map_model("claude-sonnet-4.5"), Some("claude-sonnet-4.5".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_model_name_strips_1m() {
+        // [1m] 在尾部时被剥离
+        assert_eq!(normalize_model_name("claude-opus-4-8[1m]"), "claude-opus-4-8");
+        assert_eq!(normalize_model_name("claude-sonnet-5[1m]"), "claude-sonnet-5");
+        // -thinking 在尾部时先剥离，[1m] 随后剥离
+        assert_eq!(normalize_model_name("claude-fable-5[1m]-thinking"), "claude-fable-5");
+        // [1m] 在 -thinking 之后：先尝试 strip -thinking 失败（尾部是 [1m]），再 strip [1m]
+        assert_eq!(normalize_model_name("claude-opus-4-7-thinking[1m]"), "claude-opus-4-7-thinking");
+        // [1m] 在中间，不在尾部：不剥离
+        assert_eq!(normalize_model_name("claude-sonnet-5[1m]-agentic"), "claude-sonnet-5");
+    }
+
+    #[test]
+    fn test_is_always_1m_model() {
+        assert!(is_always_1m_model("claude-opus-4.6"));
+        assert!(is_always_1m_model("claude-opus-4.7"));
+        assert!(is_always_1m_model("claude-opus-4.8"));
+        assert!(is_always_1m_model("claude-sonnet-5"));
+        assert!(is_always_1m_model("claude-fable-5"));
+        assert!(!is_always_1m_model("claude-sonnet-4.5"));
+        assert!(!is_always_1m_model("claude-sonnet-4.6"));
+        assert!(!is_always_1m_model("claude-opus-4.5"));
+        assert!(!is_always_1m_model("claude-haiku-4.5"));
+    }
+
+    #[test]
+    fn test_format_response_model_id() {
+        assert_eq!(format_response_model_id("claude-sonnet-5", "claude-sonnet-5"), "claude-sonnet-5[1m]");
+        assert_eq!(format_response_model_id("claude-opus-4-8", "claude-opus-4.8"), "claude-opus-4-8[1m]");
+        assert_eq!(format_response_model_id("claude-fable-5", "claude-fable-5"), "claude-fable-5[1m]");
+        assert_eq!(format_response_model_id("claude-sonnet-5[1m]", "claude-sonnet-5"), "claude-sonnet-5[1m]");
+        assert_eq!(format_response_model_id("claude-opus-4-7[1m]", "claude-opus-4.7"), "claude-opus-4-7[1m]");
+        assert_eq!(format_response_model_id("claude-sonnet-4-5", "claude-sonnet-4.5"), "claude-sonnet-4-5");
+        assert_eq!(format_response_model_id("claude-sonnet-4-6", "claude-sonnet-4.6"), "claude-sonnet-4-6");
+        assert_eq!(format_response_model_id("claude-haiku-4-5-20251001", "claude-haiku-4.5"), "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_resolve_effort_5_value_model() {
+        for model in &["claude-opus-4.8", "claude-opus-4.7", "claude-sonnet-5", "claude-fable-5"] {
+            assert_eq!(resolve_effort(model, "low"), Some("low".to_string()));
+            assert_eq!(resolve_effort(model, "medium"), Some("medium".to_string()));
+            assert_eq!(resolve_effort(model, "high"), Some("high".to_string()));
+            assert_eq!(resolve_effort(model, "xhigh"), Some("xhigh".to_string()));
+            assert_eq!(resolve_effort(model, "max"), Some("max".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_resolve_effort_4_value_model_downgrades_xhigh() {
+        for model in &["claude-opus-4.6", "claude-sonnet-4.6"] {
+            assert_eq!(resolve_effort(model, "low"), Some("low".to_string()));
+            assert_eq!(resolve_effort(model, "medium"), Some("medium".to_string()));
+            assert_eq!(resolve_effort(model, "high"), Some("high".to_string()));
+            assert_eq!(resolve_effort(model, "xhigh"), Some("max".to_string()));
+            assert_eq!(resolve_effort(model, "max"), Some("max".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_resolve_effort_unknown_model_optimistic() {
+        assert_eq!(resolve_effort("claude-unknown-9", "xhigh"), Some("xhigh".to_string()));
+        assert_eq!(resolve_effort("claude-sonnet-4.5", "high"), Some("high".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_effort_invalid_value_dropped() {
+        assert_eq!(resolve_effort("claude-opus-4.8", "enabled"), None);
+        assert_eq!(resolve_effort("claude-opus-4.8", "ultra"), None);
+        assert_eq!(resolve_effort("claude-opus-4.8", ""), None);
+        assert_eq!(resolve_effort("claude-opus-4.8", "HIGH"), None);
+    }
+
+    #[test]
+    fn test_supports_adaptive_thinking() {
+        assert!(supports_adaptive_thinking("claude-opus-4-8"));
+        assert!(supports_adaptive_thinking("claude-opus-4-7"));
+        assert!(supports_adaptive_thinking("claude-opus-4-6"));
+        assert!(supports_adaptive_thinking("claude-sonnet-5"));
+        assert!(supports_adaptive_thinking("claude-sonnet-4-6"));
+        assert!(supports_adaptive_thinking("claude-fable-5"));
+        assert!(!supports_adaptive_thinking("claude-sonnet-4-5"));
+        assert!(!supports_adaptive_thinking("claude-opus-4-5"));
+        assert!(!supports_adaptive_thinking("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn test_effort_with_model_id_xhigh_on_new_models() {
+        use super::super::types::{Message as AnthropicMessage, OutputConfig, Thinking};
+
+        let req = MessagesRequest {
+            model: "claude-opus-4-8".to_string(),
+            max_tokens: 1024,
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("hello"),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: Some(Thinking {
+                thinking_type: "adaptive".to_string(),
+                budget_tokens: 0,
+            }),
+            output_config: Some(OutputConfig {
+                effort: "xhigh".to_string(),
+            }),
+            metadata: None,
+        };
+
+        let prefix = generate_thinking_prefix(&req, "claude-opus-4.8").unwrap();
+        assert!(prefix.contains("<thinking_effort>xhigh</thinking_effort>"));
+
+        let req_4_6 = MessagesRequest {
+            model: "claude-opus-4-6".to_string(),
+            ..req
+        };
+        let prefix_4_6 = generate_thinking_prefix(&req_4_6, "claude-opus-4.6").unwrap();
+        assert!(prefix_4_6.contains("<thinking_effort>max</thinking_effort>"));
     }
 }
