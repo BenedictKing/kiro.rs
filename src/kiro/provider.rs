@@ -22,6 +22,7 @@ use crate::kiro::endpoint::{
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::{CallContext, MultiTokenManager};
+use crate::kiro::trace::TraceRecord;
 
 /// API 调用结果
 pub struct ApiCallResult {
@@ -229,7 +230,27 @@ impl KiroProvider {
         request_body: &str,
         user_id: Option<&str>,
     ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, false, user_id).await
+        self.call_api_with_retry(request_body, false, user_id, &mut None).await
+    }
+
+    /// 发送流式 API 请求（带追踪）
+    pub async fn call_api_stream_traced(
+        &self,
+        request_body: &str,
+        user_id: Option<&str>,
+        trace: &mut Option<crate::kiro::trace::RequestTrace>,
+    ) -> anyhow::Result<ApiCallResult> {
+        self.call_api_with_retry(request_body, true, user_id, trace).await
+    }
+
+    /// 发送 API 请求（带追踪）
+    pub async fn call_api_traced(
+        &self,
+        request_body: &str,
+        user_id: Option<&str>,
+        trace: &mut Option<crate::kiro::trace::RequestTrace>,
+    ) -> anyhow::Result<ApiCallResult> {
+        self.call_api_with_retry(request_body, false, user_id, trace).await
     }
 
     /// 发送流式 API 请求
@@ -250,7 +271,7 @@ impl KiroProvider {
         request_body: &str,
         user_id: Option<&str>,
     ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, true, user_id).await
+        self.call_api_with_retry(request_body, true, user_id, &mut None).await
     }
 
     /// 发送 MCP API 请求
@@ -532,6 +553,7 @@ impl KiroProvider {
         request_body: &str,
         is_stream: bool,
         user_id: Option<&str>,
+        trace: &mut Option<crate::kiro::trace::RequestTrace>,
     ) -> anyhow::Result<ApiCallResult> {
         let total_credentials = self.token_manager.total_count();
         let available = self.token_manager.available_count();
@@ -599,15 +621,28 @@ impl KiroProvider {
             let _request_for_log = request.try_clone();
 
             // 发送请求
+            let attempt_start = std::time::Instant::now();
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let attempt_ms = attempt_start.elapsed().as_millis() as i64;
                     tracing::warn!(
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
                         max_retries,
                         e
                     );
+                    // 记录网络错误 attempt
+                    if let Some(t) = trace.as_mut() {
+                        t.record_attempt(
+                            attempt as i32 + 1,
+                            ctx.id,
+                            0,
+                            crate::kiro::trace::AttemptOutcome::NetworkError,
+                            attempt_ms,
+                            Some(e.to_string()),
+                        );
+                    }
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
                     last_error = Some(e.into());
@@ -620,10 +655,22 @@ impl KiroProvider {
 
             let status = response.status();
             let retry_after = Self::parse_retry_after(response.headers());
+            let attempt_ms = attempt_start.elapsed().as_millis() as i64;
 
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
+                // 记录成功 attempt
+                if let Some(t) = trace.as_mut() {
+                    t.record_attempt(
+                        attempt as i32 + 1,
+                        ctx.id,
+                        status.as_u16() as i32,
+                        crate::kiro::trace::AttemptOutcome::Success,
+                        attempt_ms,
+                        None,
+                    );
+                }
                 tracing::info!(
                     credential_id = %ctx.id,
                     endpoint = %endpoint_name,
@@ -639,6 +686,26 @@ impl KiroProvider {
 
             // 失败响应：读取 body 用于日志/错误信息
             let body = response.text().await.unwrap_or_default();
+
+            // 记录失败 attempt（根据状态码分类）
+            let outcome = match status.as_u16() {
+                402 => crate::kiro::trace::AttemptOutcome::QuotaExhausted,
+                429 => crate::kiro::trace::AttemptOutcome::AccountThrottled,
+                401 | 403 => crate::kiro::trace::AttemptOutcome::AuthFailed,
+                400 => crate::kiro::trace::AttemptOutcome::BadRequest,
+                500..=599 => crate::kiro::trace::AttemptOutcome::Transient,
+                _ => crate::kiro::trace::AttemptOutcome::Unknown,
+            };
+            if let Some(t) = trace.as_mut() {
+                t.record_attempt(
+                    attempt as i32 + 1,
+                    ctx.id,
+                    status.as_u16() as i32,
+                    outcome,
+                    attempt_ms,
+                    Some(TraceRecord::truncate_error(&body)),
+                );
+            }
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
