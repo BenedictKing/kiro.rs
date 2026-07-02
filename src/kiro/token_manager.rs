@@ -12,7 +12,7 @@
 //! - **优雅降级**: Token 刷新失败时使用现有 Token
 
 use anyhow::bail;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -550,6 +550,16 @@ struct CredentialEntry {
     fingerprint: Fingerprint,
     /// API 调用成功次数
     success_count: u64,
+    /// 累计最终失败次数（重试耗尽后；持久化）
+    total_failure_count: u64,
+    /// 今日请求量（本地时区日历日；持久化）
+    daily_count: u32,
+    /// 今日对应的本地日期 "YYYY-MM-DD"（跨日自动重置；持久化）
+    daily_date: String,
+    /// 累计输入 tokens（持久化）
+    total_input_tokens: u64,
+    /// 累计输出 tokens（持久化）
+    total_output_tokens: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
     /// refreshToken 的 SHA-256 哈希缓存（避免 snapshot 重复计算）
@@ -572,6 +582,16 @@ enum AutoHealReason {
 #[derive(Serialize, Deserialize)]
 struct StatsEntry {
     success_count: u64,
+    #[serde(default)]
+    failure_count: u64,
+    #[serde(default)]
+    daily_count: u32,
+    #[serde(default)]
+    daily_date: String,
+    #[serde(default)]
+    total_input_tokens: u64,
+    #[serde(default)]
+    total_output_tokens: u64,
     last_used_at: Option<String>,
 }
 
@@ -609,6 +629,14 @@ pub struct CredentialEntrySnapshot {
     pub subscription_title: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
+    /// 累计最终失败次数（重试耗尽后）
+    pub total_failure_count: u64,
+    /// 今日请求量（本地时区日历日）
+    pub daily_count: u32,
+    /// 累计输入 tokens
+    pub total_input_tokens: u64,
+    /// 累计输出 tokens
+    pub total_output_tokens: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 凭据级 Region（用于 Token 刷新）
@@ -887,6 +915,11 @@ impl MultiTokenManager {
                     },
                     fingerprint,
                     success_count: 0,
+                    total_failure_count: 0,
+                    daily_count: 0,
+                    daily_date: String::new(),
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
                     last_used_at: None,
                     refresh_token_hash,
                 }
@@ -1977,7 +2010,19 @@ impl MultiTokenManager {
         for entry in entries.iter_mut() {
             if let Some(s) = stats.get(&entry.id.to_string()) {
                 entry.success_count = s.success_count;
+                entry.total_failure_count = s.failure_count;
+                entry.total_input_tokens = s.total_input_tokens;
+                entry.total_output_tokens = s.total_output_tokens;
                 entry.last_used_at = s.last_used_at.clone();
+                // 日请求量：仅当日日期匹配时恢复，否则从 0 开始
+                let today = Local::now().format("%Y-%m-%d").to_string();
+                if s.daily_date == today {
+                    entry.daily_count = s.daily_count;
+                    entry.daily_date = s.daily_date.clone();
+                } else {
+                    entry.daily_count = 0;
+                    entry.daily_date = today;
+                }
             }
         }
         *self.last_stats_save_at.lock() = Some(Instant::now());
@@ -2001,6 +2046,11 @@ impl MultiTokenManager {
                         e.id.to_string(),
                         StatsEntry {
                             success_count: e.success_count,
+                            failure_count: e.total_failure_count,
+                            daily_count: e.daily_count,
+                            daily_date: e.daily_date.clone(),
+                            total_input_tokens: e.total_input_tokens,
+                            total_output_tokens: e.total_output_tokens,
                             last_used_at: e.last_used_at.clone(),
                         },
                     )
@@ -2048,7 +2098,7 @@ impl MultiTokenManager {
 
     /// 报告指定凭据 API 调用成功
     ///
-    /// 重置该凭据的失败计数
+    /// 重置该凭据的失败计数，更新日请求量和累计统计
     ///
     /// # Arguments
     /// * `id` - 凭据 ID（来自 CallContext）
@@ -2065,14 +2115,38 @@ impl MultiTokenManager {
                 entry.failure_count = 0;
                 entry.success_count += 1;
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
+                // 日请求量：跨日重置（本地时区）
+                let today = Local::now().format("%Y-%m-%d").to_string();
+                if entry.daily_date != today {
+                    entry.daily_count = 0;
+                    entry.daily_date = today;
+                }
+                entry.daily_count += 1;
                 tracing::debug!(
-                    "凭据 #{} API 调用成功（累计 {} 次）",
+                    "凭据 #{} API 调用成功（累计 {} 次，今日 {} 次）",
                     id,
-                    entry.success_count
+                    entry.success_count,
+                    entry.daily_count
                 );
             }
         }
         self.save_stats_debounced();
+    }
+
+    /// 记录 token 用量（在成功请求后由 stream/handler 调用）
+    ///
+    /// # Arguments
+    /// * `id` - 凭据 ID
+    /// * `input_tokens` - 输入 tokens
+    /// * `output_tokens` - 输出 tokens
+    pub fn record_token_usage(&self, id: u64, input_tokens: u64, output_tokens: u64) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.total_input_tokens += input_tokens;
+            entry.total_output_tokens += output_tokens;
+        }
+        // 保存留给下次 debounce flush
+        self.stats_dirty.store(true, Ordering::Relaxed);
     }
 
     /// 报告指定凭据 API 调用失败
@@ -2092,6 +2166,7 @@ impl MultiTokenManager {
             };
 
             entry.failure_count += 1;
+            entry.total_failure_count += 1;
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             let failure_count = entry.failure_count;
 
@@ -2403,6 +2478,10 @@ impl MultiTokenManager {
                         email: e.credentials.email.clone(),
                         subscription_title: e.credentials.subscription_title.clone(),
                         success_count: e.success_count,
+                        total_failure_count: e.total_failure_count,
+                        daily_count: e.daily_count,
+                        total_input_tokens: e.total_input_tokens,
+                        total_output_tokens: e.total_output_tokens,
                         last_used_at: e.last_used_at.clone(),
                         region: e.credentials.region.clone(),
                         api_region: e.credentials.api_region.clone(),
@@ -2762,6 +2841,11 @@ impl MultiTokenManager {
                 disable_reason: None,
                 fingerprint,
                 success_count: 0,
+                total_failure_count: 0,
+                daily_count: 0,
+                daily_date: String::new(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
                 last_used_at: None,
                 refresh_token_hash: entry_secret_hash,
             });
