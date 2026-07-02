@@ -38,6 +38,11 @@ pub trait KiroEndpoint: Send + Sync {
 
     fn usage_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts>;
 
+    fn list_models_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts> {
+        // 默认实现：与 usage_request_parts 相同的 URL 结构
+        self.usage_request_parts(ctx)
+    }
+
     fn is_monthly_request_limit(&self, body: &str) -> bool {
         default_is_monthly_request_limit(body)
     }

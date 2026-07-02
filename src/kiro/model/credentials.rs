@@ -114,7 +114,7 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
-fn canonicalize_auth_method_value(value: &str) -> &str {
+pub fn canonicalize_auth_method_value(value: &str) -> &str {
     if value.eq_ignore_ascii_case("builder-id") || value.eq_ignore_ascii_case("iam") {
         "idc"
     } else if value.eq_ignore_ascii_case("api_key") || value.eq_ignore_ascii_case("apikey") {

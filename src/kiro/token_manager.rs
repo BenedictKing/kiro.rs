@@ -35,7 +35,7 @@ use crate::kiro::endpoint::{
 };
 use crate::kiro::fingerprint::Fingerprint;
 use crate::kiro::machine_id;
-use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::model::credentials::{KiroCredentials, canonicalize_auth_method_value};
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
@@ -502,6 +502,93 @@ pub(crate) async fn get_usage_limits(
     Ok(data)
 }
 
+/// 上游可用模型信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    #[serde(rename = "modelId")]
+    pub model_id: String,
+    #[serde(rename = "modelName")]
+    pub model_name: Option<String>,
+    pub description: Option<String>,
+    #[serde(rename = "supportedInputTypes")]
+    pub input_types: Option<Vec<String>>,
+    #[serde(rename = "rateMultiplier")]
+    pub rate_multiplier: Option<f64>,
+    #[serde(rename = "tokenLimits")]
+    pub token_limits: Option<TokenLimits>,
+}
+
+/// 模型 Token 限制
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenLimits {
+    #[serde(rename = "maxInputTokens")]
+    pub max_input_tokens: Option<u64>,
+    #[serde(rename = "maxOutputTokens")]
+    pub max_output_tokens: Option<u64>,
+}
+
+/// ListAvailableModels API 响应
+#[derive(Debug, Clone, Deserialize)]
+struct ListAvailableModelsResponse {
+    models: Vec<ModelInfo>,
+}
+
+/// 从上游获取可用模型列表
+pub(crate) async fn list_available_models(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<Vec<ModelInfo>> {
+    tracing::debug!(
+        endpoint = %credentials.effective_endpoint_name(Some(&config.default_endpoint)),
+        "正在获取可用模型列表..."
+    );
+
+    let machine_id = machine_id::generate_from_credentials(credentials, config)
+        .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
+    let endpoint = endpoint_for_credentials(credentials, config)?;
+    let ctx = RequestContext {
+        credentials,
+        token,
+        machine_id: &machine_id,
+        config,
+    };
+    let parts = endpoint.list_models_request_parts(&ctx)?;
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let mut request = client.get(&parts.url);
+    for (name, value) in parts.headers {
+        request = request.header(name, value);
+    }
+
+    let response = request.send().await?;
+
+    let status = response.status();
+    let body_text = response.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(
+            "ListAvailableModels 请求失败: status={}, body={}",
+            status,
+            &body_text[..body_text.len().min(500)]
+        );
+        anyhow::bail!("ListAvailableModels 失败: {} {}", status, body_text);
+    }
+
+    tracing::debug!("ListAvailableModels 响应: {}", &body_text[..body_text.len().min(1000)]);
+
+    let data: ListAvailableModelsResponse = serde_json::from_str(&body_text).map_err(|e| {
+        tracing::error!(
+            "ListAvailableModels JSON 解析失败: {}，原始响应: {}",
+            e,
+            body_text
+        );
+        anyhow::anyhow!("JSON 解析失败: {}", e)
+    })?;
+    Ok(data.models)
+}
+
 // ============================================================================
 // 多凭据 Token 管理器
 // ============================================================================
@@ -742,6 +829,10 @@ pub struct MultiTokenManager {
     last_stats_save_at: Mutex<Option<Instant>>,
     /// 统计数据是否有未落盘更新
     stats_dirty: AtomicBool,
+    /// 缓存的上游可用模型列表
+    cached_models: Mutex<Vec<ModelInfo>>,
+    /// 模型缓存最后更新时间
+    models_cache_time: Mutex<Option<Instant>>,
 }
 
 /// 凭据可用性诊断：被禁用的凭据
@@ -973,6 +1064,8 @@ impl MultiTokenManager {
             background_refresher: None,
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
+            cached_models: Mutex::new(Vec::new()),
+            models_cache_time: Mutex::new(None),
         };
 
         // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
@@ -2366,6 +2459,112 @@ impl MultiTokenManager {
         let ctx = self.acquire_context().await?;
         let proxy = self.proxy.read().clone();
         get_usage_limits(&ctx.credentials, &config, &ctx.token, proxy.as_ref()).await
+    }
+
+    /// 获取上游可用模型列表（带缓存，5 分钟刷新）
+    pub async fn get_available_models(&self) -> Vec<ModelInfo> {
+        // 检查缓存是否有效（5 分钟内）
+        {
+            let cache_time = self.models_cache_time.lock();
+            if let Some(t) = *cache_time {
+                if t.elapsed() < StdDuration::from_secs(300) {
+                    return self.cached_models.lock().clone();
+                }
+            }
+        }
+
+        // 缓存过期，尝试刷新
+        match self.refresh_models_cache().await {
+            Ok(models) => models,
+            Err(_) => self.cached_models.lock().clone(),
+        }
+    }
+
+    /// 刷新模型缓存（尝试多个凭据直到成功）
+    async fn refresh_models_cache(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        let config = self.config.read().clone();
+        let proxy = self.proxy.read().clone();
+
+        // 获取所有可用凭据 ID（优先尝试 social 凭据，因为 IdC 凭据可能无 ListAvailableModels 权限）
+        let credential_ids: Vec<u64> = {
+            let entries = self.entries.lock();
+            let mut ids: Vec<u64> = entries
+                .iter()
+                .filter(|e| !e.disabled)
+                .map(|e| e.id)
+                .collect();
+            // 按 auth_method 排序：social 优先，其他靠后
+            ids.sort_by_key(|id| {
+                entries
+                    .iter()
+                    .find(|e| e.id == *id)
+                    .map(|e| {
+                        if e
+                            .credentials
+                            .auth_method
+                            .as_deref()
+                            .map(|m| canonicalize_auth_method_value(m) == "social")
+                            .unwrap_or(false)
+                        {
+                            0
+                        } else {
+                            1
+                        }
+                    })
+                    .unwrap_or(2)
+            });
+            ids
+        };
+
+        let mut last_err = None;
+        for cred_id in credential_ids {
+            // 获取该凭据的上下文（含 token 刷新）
+            let credentials = {
+                let entries = self.entries.lock();
+                entries
+                    .iter()
+                    .find(|e| e.id == cred_id)
+                    .map(|e| e.credentials.clone())
+            };
+            let Some(creds) = credentials else {
+                tracing::debug!("凭据 #{} 不存在", cred_id);
+                continue;
+            };
+
+            let ctx = match self.try_ensure_token(cred_id, &creds).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::debug!("凭据 #{} token 获取失败: {}", cred_id, e);
+                    continue;
+                }
+            };
+
+            match list_available_models(&ctx.credentials, &config, &ctx.token, proxy.as_ref()).await {
+                Ok(models) => {
+                    tracing::info!(
+                        "从上游获取到 {} 个可用模型 (凭据 #{})",
+                        models.len(),
+                        cred_id
+                    );
+                    if !models.is_empty() {
+                        for m in &models {
+                            tracing::debug!("  - {}", m.model_id);
+                        }
+                    }
+                    // 更新缓存
+                    *self.cached_models.lock() = models.clone();
+                    *self.models_cache_time.lock() = Some(Instant::now());
+                    return Ok(models);
+                }
+                Err(e) => {
+                    tracing::debug!("凭据 #{} 获取模型列表失败: {}", cred_id, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        tracing::warn!("所有凭据获取模型列表均失败");
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("无可用凭据")))
     }
 
     /// 初始化所有凭据的余额缓存

@@ -649,126 +649,85 @@ fn strip_empty_text_content_blocks(messages: &mut [super::types::Message]) -> us
 
 /// GET /v1/models
 ///
-/// 返回可用的模型列表。
-pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
+/// 返回可用的模型列表。优先从上游动态获取，失败时使用本地 fallback。
+pub async fn get_models(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+) -> impl IntoResponse {
     tracing::info!(
         path = %uri.path(),
         "Received request"
     );
 
-    let models = vec![
-        // Sonnet 5（always-1M，最新一代）
-        Model {
-            id: "claude-sonnet-5".to_string(),
-            object: "model".to_string(),
-            created: 1782940800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Sonnet 5".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-sonnet-5-thinking".to_string(),
-            object: "model".to_string(),
-            created: 1782940800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Sonnet 5 (Thinking)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-sonnet-5-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1782940800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Sonnet 5 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        // Fable 5（always-1M，直通预留）
-        Model {
-            id: "claude-fable-5".to_string(),
-            object: "model".to_string(),
-            created: 1782940800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Fable 5".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-fable-5-thinking".to_string(),
-            object: "model".to_string(),
-            created: 1782940800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Fable 5 (Thinking)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-fable-5-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1782940800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Fable 5 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        // Opus 4.8（always-1M）
-        Model {
-            id: "claude-opus-4-8".to_string(),
-            object: "model".to_string(),
-            created: 1780089600,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.8".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(128_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-8-thinking".to_string(),
-            object: "model".to_string(),
-            created: 1780089600,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.8 (Thinking)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(128_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-8-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1780089600,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.8 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(128_000),
-            thinking: Some(true),
-        },
-        // Sonnet 4.6（always-1M）
+    // 尝试从上游获取可用模型
+    let models = if let Some(ref provider) = state.kiro_provider {
+        let upstream_models = provider.get_available_models().await;
+        if !upstream_models.is_empty() {
+            tracing::info!("使用上游模型列表 ({} 个模型)", upstream_models.len());
+            upstream_models
+                .into_iter()
+                .map(|m| {
+                    let model_id = m.model_id.clone();
+                    let display_name = m.model_name.unwrap_or_else(|| model_id.clone());
+                    let max_input = m
+                        .token_limits
+                        .as_ref()
+                        .and_then(|t| t.max_input_tokens)
+                        .unwrap_or(200_000);
+                    let max_output = m
+                        .token_limits
+                        .as_ref()
+                        .and_then(|t| t.max_output_tokens)
+                        .unwrap_or(64_000);
+
+                    // 生成原始模型 + thinking 变体
+                    vec![
+                        Model {
+                            id: model_id.clone(),
+                            object: "model".to_string(),
+                            created: 1727740800,
+                            owned_by: "anthropic".to_string(),
+                            display_name: display_name.clone(),
+                            model_type: "chat".to_string(),
+                            max_tokens: 32000,
+                            context_length: Some(max_input as i32),
+                            max_completion_tokens: Some(max_output as i32),
+                            thinking: Some(true),
+                        },
+                        Model {
+                            id: format!("{}-thinking", model_id),
+                            object: "model".to_string(),
+                            created: 1727740800,
+                            owned_by: "anthropic".to_string(),
+                            display_name: format!("{} (Thinking)", display_name),
+                            model_type: "chat".to_string(),
+                            max_tokens: 32000,
+                            context_length: Some(max_input as i32),
+                            max_completion_tokens: Some(max_output as i32),
+                            thinking: Some(true),
+                        },
+                    ]
+                })
+                .flatten()
+                .collect()
+        } else {
+            tracing::warn!("上游返回空模型列表，使用本地 fallback");
+            fallback_models()
+        }
+    } else {
+        tracing::info!("无 KiroProvider，使用本地 fallback 模型列表");
+        fallback_models()
+    };
+
+    Json(ModelsResponse {
+        object: "list".to_string(),
+        data: models,
+    })
+}
+
+/// 本地 fallback 模型列表（当上游不可用时使用）
+fn fallback_models() -> Vec<Model> {
+    vec![
         Model {
             id: "claude-sonnet-4-6".to_string(),
             object: "model".to_string(),
@@ -790,90 +749,6 @@ pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
             model_type: "chat".to_string(),
             max_tokens: 32000,
             context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-sonnet-4-6-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1770314400,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Sonnet 4.6 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-sonnet-4-5-20250929".to_string(),
-            object: "model".to_string(),
-            created: 1727568000,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Sonnet 4.5".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-sonnet-4-5-20250929-thinking".to_string(),
-            object: "model".to_string(),
-            created: 1727568000,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Sonnet 4.5 (Thinking)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-sonnet-4-5-20250929-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1727568000,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Sonnet 4.5 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-5-20251101".to_string(),
-            object: "model".to_string(),
-            created: 1730419200,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.5".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-5-20251101-thinking".to_string(),
-            object: "model".to_string(),
-            created: 1730419200,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.5 (Thinking)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-5-20251101-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1730419200,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.5 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
             max_completion_tokens: Some(64_000),
             thinking: Some(true),
         },
@@ -901,96 +776,7 @@ pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
             max_completion_tokens: Some(128_000),
             thinking: Some(true),
         },
-        Model {
-            id: "claude-opus-4-6-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1770314400,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.6 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(128_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-7".to_string(),
-            object: "model".to_string(),
-            created: 1772992800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.7".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(128_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-7-thinking".to_string(),
-            object: "model".to_string(),
-            created: 1772992800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.7 (Thinking)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(128_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-opus-4-7-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1772992800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Opus 4.7 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(1_000_000),
-            max_completion_tokens: Some(128_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-haiku-4-5-20251001".to_string(),
-            object: "model".to_string(),
-            created: 1727740800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Haiku 4.5".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-haiku-4-5-20251001-thinking".to_string(),
-            object: "model".to_string(),
-            created: 1727740800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Haiku 4.5 (Thinking)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-        Model {
-            id: "claude-haiku-4-5-20251001-agentic".to_string(),
-            object: "model".to_string(),
-            created: 1727740800,
-            owned_by: "anthropic".to_string(),
-            display_name: "Claude Haiku 4.5 (Agentic)".to_string(),
-            model_type: "chat".to_string(),
-            max_tokens: 32000,
-            context_length: Some(200_000),
-            max_completion_tokens: Some(64_000),
-            thinking: Some(true),
-        },
-    ];
-
-    Json(ModelsResponse {
-        object: "list".to_string(),
-        data: models,
-    })
+    ]
 }
 
 /// POST /v1/messages

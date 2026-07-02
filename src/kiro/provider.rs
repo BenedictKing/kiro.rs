@@ -192,6 +192,11 @@ impl KiroProvider {
         Arc::clone(&self.token_manager)
     }
 
+    /// 获取上游可用模型列表（带缓存）
+    pub async fn get_available_models(&self) -> Vec<crate::kiro::token_manager::ModelInfo> {
+        self.token_manager.get_available_models().await
+    }
+
     /// 后台异步刷新余额缓存（如果需要）
     fn spawn_balance_refresh(&self, id: u64) {
         // 检查缓存是否需要刷新
@@ -217,27 +222,6 @@ impl KiroProvider {
         });
     }
 
-    /// 发送非流式 API 请求
-    ///
-    /// 支持多凭据故障转移：
-    /// - 400 Bad Request: 直接返回错误，不计入凭据失败
-    /// - 401/403: 视为凭据/权限问题，计入失败次数并允许故障转移
-    /// - 402 MONTHLY_REQUEST_COUNT: 视为额度用尽，禁用凭据并切换
-    /// - 429/5xx/网络等瞬态错误: 重试但不禁用或切换凭据（避免误把所有凭据锁死）
-    ///
-    /// # Arguments
-    /// * `request_body` - JSON 格式的请求体字符串
-    ///
-    /// # Returns
-    /// 返回原始的 HTTP Response，不做解析
-    pub async fn call_api(
-        &self,
-        request_body: &str,
-        user_id: Option<&str>,
-    ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, false, user_id, &mut None).await
-    }
-
     /// 发送流式 API 请求（带追踪）
     pub async fn call_api_stream_traced(
         &self,
@@ -245,7 +229,8 @@ impl KiroProvider {
         user_id: Option<&str>,
         trace: &mut Option<crate::kiro::trace::RequestTrace>,
     ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, true, user_id, trace).await
+        self.call_api_with_retry(request_body, true, user_id, trace)
+            .await
     }
 
     /// 发送 API 请求（带追踪）
@@ -255,28 +240,8 @@ impl KiroProvider {
         user_id: Option<&str>,
         trace: &mut Option<crate::kiro::trace::RequestTrace>,
     ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, false, user_id, trace).await
-    }
-
-    /// 发送流式 API 请求
-    ///
-    /// 支持多凭据故障转移：
-    /// - 400 Bad Request: 直接返回错误，不计入凭据失败
-    /// - 401/403: 视为凭据/权限问题，计入失败次数并允许故障转移
-    /// - 402 MONTHLY_REQUEST_COUNT: 视为额度用尽，禁用凭据并切换
-    /// - 429/5xx/网络等瞬态错误: 重试但不禁用或切换凭据（避免误把所有凭据锁死）
-    ///
-    /// # Arguments
-    /// * `request_body` - JSON 格式的请求体字符串
-    ///
-    /// # Returns
-    /// 返回原始的 HTTP Response，调用方负责处理流式数据
-    pub async fn call_api_stream(
-        &self,
-        request_body: &str,
-        user_id: Option<&str>,
-    ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, true, user_id, &mut None).await
+        self.call_api_with_retry(request_body, false, user_id, trace)
+            .await
     }
 
     /// 发送 MCP API 请求

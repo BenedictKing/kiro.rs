@@ -186,4 +186,47 @@ impl KiroEndpoint for IdeEndpoint {
 
         Ok(UsageRequestParts { url, headers })
     }
+
+    fn list_models_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts> {
+        let region = ctx.credentials.effective_api_region(ctx.config);
+        let host = format!("codewhisperer.{}.amazonaws.com", region);
+        let mut url = format!(
+            "https://{}/ListAvailableModels?origin=AI_EDITOR&maxResults=50",
+            host
+        );
+        if let Some(profile_arn) = Self::mcp_profile_arn_header_value(ctx.credentials) {
+            url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
+        }
+
+        let mut headers = vec![
+            (
+                "x-amz-user-agent",
+                format!(
+                    "aws-sdk-js/1.0.0 KiroIDE-{}-{}",
+                    ctx.config.kiro_version, ctx.machine_id
+                ),
+            ),
+            (
+                "user-agent",
+                format!(
+                    "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
+                    ctx.config.system_version,
+                    ctx.config.node_version,
+                    ctx.config.kiro_version,
+                    ctx.machine_id
+                ),
+            ),
+            ("host", host),
+            ("amz-sdk-invocation-id", Uuid::new_v4().to_string()),
+            ("amz-sdk-request", "attempt=1; max=1".to_string()),
+            ("Authorization", format!("Bearer {}", ctx.token)),
+            ("Connection", "close".to_string()),
+        ];
+
+        if ctx.credentials.is_api_key_credential() {
+            headers.push(("tokentype", "API_KEY".to_string()));
+        }
+
+        Ok(UsageRequestParts { url, headers })
+    }
 }
