@@ -14,6 +14,7 @@ mod handlers;
 mod middleware;
 mod router;
 mod service;
+pub mod trace_db;
 pub mod types;
 
 pub use middleware::AdminState;

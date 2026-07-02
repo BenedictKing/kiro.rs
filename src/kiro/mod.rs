@@ -11,4 +11,5 @@ pub mod parser;
 pub mod provider;
 pub mod rate_limiter;
 pub mod token_manager;
+pub mod trace;
 pub mod web_portal;

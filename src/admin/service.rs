@@ -981,6 +981,86 @@ impl AdminService {
             target.max_request_body_bytes = v;
         }
     }
+
+    /// 获取全局统计（从各凭据 StatsEntry 聚合）
+    pub fn get_global_stats(&self) -> serde_json::Value {
+        let snapshot = self.token_manager.snapshot();
+        let total = snapshot.total as u64;
+        let available = snapshot.available as u64;
+        let entries = &snapshot.entries;
+
+        let total_requests: u64 = entries.iter().map(|e| e.success_count + e.total_failure_count).sum();
+        let total_success: u64 = entries.iter().map(|e| e.success_count).sum();
+        let total_failures: u64 = entries.iter().map(|e| e.total_failure_count).sum();
+        let today_requests: u64 = entries.iter().map(|e| e.daily_count as u64).sum();
+        let total_input_tokens: u64 = entries.iter().map(|e| e.total_input_tokens).sum();
+        let total_output_tokens: u64 = entries.iter().map(|e| e.total_output_tokens).sum();
+
+        serde_json::json!({
+            "totalCredentials": total,
+            "availableCredentials": available,
+            "totalRequests": total_requests,
+            "successRequests": total_success,
+            "failedRequests": total_failures,
+            "todayRequests": today_requests,
+            "totalInputTokens": total_input_tokens,
+            "totalOutputTokens": total_output_tokens,
+        })
+    }
+
+    /// 获取所有凭据的冷却状态
+    pub fn get_cooldown_statuses(&self) -> serde_json::Value {
+        let cooldowns = self.token_manager.cooldown_manager().get_all_cooldowns();
+        let snapshot = self.token_manager.snapshot();
+
+        let items: Vec<serde_json::Value> = cooldowns
+            .iter()
+            .map(|cd| {
+                let email = snapshot
+                    .entries
+                    .iter()
+                    .find(|e| e.id == cd.credential_id)
+                    .and_then(|e| e.email.as_deref())
+                    .unwrap_or("unknown");
+
+                serde_json::json!({
+                    "credentialId": cd.credential_id,
+                    "email": email,
+                    "reason": cd.reason.description(),
+                    "remainingMs": cd.remaining_ms,
+                    "remainingSecs": cd.remaining_ms / 1000,
+                    "triggerCount": cd.trigger_count,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "cooldowns": items,
+            "total": items.len(),
+        })
+    }
+
+    /// 获取请求日志（需要 TraceDb）
+    pub fn get_request_logs(
+        &self,
+        trace_db: &super::trace_db::TraceDb,
+        limit: u32,
+        before_ts_epoch: Option<i64>,
+        status_filter: Option<i32>,
+        credential_filter: Option<u64>,
+    ) -> serde_json::Value {
+        match trace_db.query_logs(limit, before_ts_epoch, status_filter, credential_filter) {
+            Ok(logs) => serde_json::json!({
+                "items": logs,
+                "total": logs.len(),
+            }),
+            Err(e) => serde_json::json!({
+                "items": [],
+                "total": 0,
+                "error": e.to_string(),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]

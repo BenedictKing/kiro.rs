@@ -203,3 +203,13 @@ pub async fn update_global_config(
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
+
+/// GET /api/admin/stats - 获取全局统计
+pub async fn get_stats(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_global_stats())
+}
+
+/// GET /api/admin/cooldowns - 获取所有凭据冷却状态
+pub async fn get_cooldowns(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_cooldown_statuses())
+}
