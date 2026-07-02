@@ -313,9 +313,7 @@ impl CooldownManager {
             .filter(|(_, e)| !e.reason.is_auto_recoverable() && Instant::now() < e.expires_at)
             .map(|(&id, e)| {
                 // 计算 expires_at 的绝对时间：now + (expires_at - Instant::now())
-                let remaining = e
-                    .expires_at
-                    .saturating_duration_since(Instant::now());
+                let remaining = e.expires_at.saturating_duration_since(Instant::now());
                 let expires_at = now + chrono::Duration::from_std(remaining).unwrap_or_default();
                 PersistentCooldownEntry {
                     credential_id: id,
@@ -335,11 +333,11 @@ impl CooldownManager {
         match serde_json::to_string_pretty(&persistent) {
             Ok(json) => {
                 let tmp = path.with_extension("json.tmp");
-                if std::fs::write(&tmp, &json).is_ok() {
-                    if let Err(e) = std::fs::rename(&tmp, path) {
-                        tracing::warn!("原子重命名冷却持久化文件失败: {}", e);
-                        let _ = std::fs::remove_file(&tmp);
-                    }
+                if std::fs::write(&tmp, &json).is_ok()
+                    && let Err(e) = std::fs::rename(&tmp, path)
+                {
+                    tracing::warn!("原子重命名冷却持久化文件失败: {}", e);
+                    let _ = std::fs::remove_file(&tmp);
                 }
             }
             Err(e) => tracing::warn!("序列化冷却数据失败: {}", e),
@@ -373,8 +371,8 @@ impl CooldownManager {
         let mut entries = self.entries.lock();
 
         for p in persistent {
-            let expires_at_utc =
-                chrono::DateTime::parse_from_rfc3339(&p.expires_at).map(|dt| dt.with_timezone(&chrono::Utc));
+            let expires_at_utc = chrono::DateTime::parse_from_rfc3339(&p.expires_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc));
             let expires_at_utc = match expires_at_utc {
                 Ok(t) => t,
                 Err(_) => continue,

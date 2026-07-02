@@ -40,8 +40,6 @@ pub enum AttemptOutcome {
     NetworkError,
     /// 请求格式错误（400）
     BadRequest,
-    /// 流被中断
-    StreamInterrupted,
     /// 未知
     Unknown,
 }

@@ -198,7 +198,6 @@ impl TraceDb {
             AttemptOutcome::Transient => "transient",
             AttemptOutcome::NetworkError => "network_error",
             AttemptOutcome::BadRequest => "bad_request",
-            AttemptOutcome::StreamInterrupted => "stream_interrupted",
             AttemptOutcome::Unknown => "unknown",
         }
     }
@@ -218,10 +217,8 @@ impl TraceDb {
         status_filter: Option<i32>,
         credential_filter: Option<u64>,
     ) -> anyhow::Result<Vec<RequestLogSummary>> {
-        let conn = Connection::open_with_flags(
-            &self.db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let conn =
+            Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
         // 动态构建查询
         let mut sql = String::from(
@@ -325,10 +322,8 @@ impl TraceDb {
         status_filter: Option<i32>,
         credential_filter: Option<u64>,
     ) -> anyhow::Result<usize> {
-        let conn = Connection::open_with_flags(
-            &self.db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let conn =
+            Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
         let mut sql = String::from("SELECT COUNT(*) FROM request_logs WHERE 1=1");
         if status_filter.is_some() {
@@ -371,10 +366,5 @@ impl TraceDb {
             tracing::info!("清理了 {} 条过期请求日志", count1 + count2);
         }
         Ok(count1 + count2)
-    }
-
-    /// 设置保留天数
-    pub fn set_retention_days(&mut self, days: u32) {
-        self.retention_days = days;
     }
 }
