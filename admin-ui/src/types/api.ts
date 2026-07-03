@@ -456,3 +456,8 @@ export interface RequestLogsResponse {
   total: number
   error?: string
 }
+
+// 清空请求日志响应
+export interface ClearRequestLogsResponse {
+  deleted: number
+}

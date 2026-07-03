@@ -25,6 +25,7 @@ import {
   getGlobalStats,
   getCooldowns,
   getRequestLogs,
+  clearRequestLogs,
 } from '@/api/credentials'
 import type { AddCredentialRequest, UpdateCredentialRequest, ImportTokenJsonRequest, UpdateGlobalConfigRequest } from '@/types/api'
 
@@ -299,5 +300,16 @@ export function useRequestLogs(params?: {
     queryFn: () => getRequestLogs(params),
     enabled: params?.enabled !== false,
     refetchInterval: 15000,
+  })
+}
+
+// 清空请求日志
+export function useClearRequestLogs() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => clearRequestLogs(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['requestLogs'] })
+    },
   })
 }

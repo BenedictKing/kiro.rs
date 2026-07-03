@@ -22,6 +22,7 @@ import type {
   GlobalStatsResponse,
   CooldownsResponse,
   RequestLogsResponse,
+  ClearRequestLogsResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -233,5 +234,11 @@ export async function getRequestLogs(params?: {
   const qs = searchParams.toString()
   const url = qs ? `/request-logs?${qs}` : '/request-logs'
   const { data } = await api.get<RequestLogsResponse>(url)
+  return data
+}
+
+// 清空所有请求日志
+export async function clearRequestLogs(): Promise<ClearRequestLogsResponse> {
+  const { data } = await api.delete<ClearRequestLogsResponse>('/request-logs')
   return data
 }
