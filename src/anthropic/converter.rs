@@ -3293,53 +3293,122 @@ mod tests {
 
     #[test]
     fn test_map_model_sonnet_5() {
-        assert_eq!(map_model("claude-sonnet-5"), Some("claude-sonnet-5".to_string()));
-        assert_eq!(map_model("claude-sonnet-5-thinking"), Some("claude-sonnet-5".to_string()));
-        assert_eq!(map_model("claude-sonnet-5-agentic"), Some("claude-sonnet-5".to_string()));
-        assert_eq!(map_model("claude-sonnet-5[1m]"), Some("claude-sonnet-5".to_string()));
+        assert_eq!(
+            map_model("claude-sonnet-5"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-5-thinking"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-5-agentic"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-5[1m]"),
+            Some("claude-sonnet-5".to_string())
+        );
     }
 
     #[test]
     fn test_map_model_fable_5() {
-        assert_eq!(map_model("claude-fable-5"), Some("claude-fable-5".to_string()));
-        assert_eq!(map_model("claude-fable-5-thinking"), Some("claude-fable-5".to_string()));
-        assert_eq!(map_model("claude-fable-5-agentic"), Some("claude-fable-5".to_string()));
-        assert_eq!(map_model("claude-fable-5[1m]"), Some("claude-fable-5".to_string()));
+        assert_eq!(
+            map_model("claude-fable-5"),
+            Some("claude-fable-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-fable-5-thinking"),
+            Some("claude-fable-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-fable-5-agentic"),
+            Some("claude-fable-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-fable-5[1m]"),
+            Some("claude-fable-5".to_string())
+        );
     }
 
     #[test]
     fn test_map_model_opus_4_8() {
-        assert_eq!(map_model("claude-opus-4-8"), Some("claude-opus-4.8".to_string()));
-        assert_eq!(map_model("claude-opus-4.8"), Some("claude-opus-4.8".to_string()));
-        assert_eq!(map_model("claude-opus-4-8-thinking"), Some("claude-opus-4.8".to_string()));
-        assert_eq!(map_model("claude-opus-4-8[1m]"), Some("claude-opus-4.8".to_string()));
+        assert_eq!(
+            map_model("claude-opus-4-8"),
+            Some("claude-opus-4.8".to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-4.8"),
+            Some("claude-opus-4.8".to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-4-8-thinking"),
+            Some("claude-opus-4.8".to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-4-8[1m]"),
+            Some("claude-opus-4.8".to_string())
+        );
     }
 
     #[test]
     fn test_map_model_sonnet_4_8() {
-        assert_eq!(map_model("claude-sonnet-4-8"), Some("claude-sonnet-4.8".to_string()));
-        assert_eq!(map_model("claude-sonnet-4.8"), Some("claude-sonnet-4.8".to_string()));
-        assert_eq!(map_model("claude-sonnet-4-8-thinking"), Some("claude-sonnet-4.8".to_string()));
+        assert_eq!(
+            map_model("claude-sonnet-4-8"),
+            Some("claude-sonnet-4.8".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4.8"),
+            Some("claude-sonnet-4.8".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4-8-thinking"),
+            Some("claude-sonnet-4.8".to_string())
+        );
     }
 
     #[test]
     fn test_map_model_sonnet_5_not_confused_with_4_5() {
-        assert_eq!(map_model("claude-sonnet-5"), Some("claude-sonnet-5".to_string()));
-        assert_eq!(map_model("claude-sonnet-4-5"), Some("claude-sonnet-4.5".to_string()));
-        assert_eq!(map_model("claude-sonnet-4.5"), Some("claude-sonnet-4.5".to_string()));
+        assert_eq!(
+            map_model("claude-sonnet-5"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4-5"),
+            Some("claude-sonnet-4.5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-4.5"),
+            Some("claude-sonnet-4.5".to_string())
+        );
     }
 
     #[test]
     fn test_normalize_model_name_strips_1m() {
         // [1m] 在尾部时被剥离
-        assert_eq!(normalize_model_name("claude-opus-4-8[1m]"), "claude-opus-4-8");
-        assert_eq!(normalize_model_name("claude-sonnet-5[1m]"), "claude-sonnet-5");
+        assert_eq!(
+            normalize_model_name("claude-opus-4-8[1m]"),
+            "claude-opus-4-8"
+        );
+        assert_eq!(
+            normalize_model_name("claude-sonnet-5[1m]"),
+            "claude-sonnet-5"
+        );
         // -thinking 在尾部时先剥离，[1m] 随后剥离
-        assert_eq!(normalize_model_name("claude-fable-5[1m]-thinking"), "claude-fable-5");
+        assert_eq!(
+            normalize_model_name("claude-fable-5[1m]-thinking"),
+            "claude-fable-5"
+        );
         // [1m] 在 -thinking 之后也应完整剥离
-        assert_eq!(normalize_model_name("claude-opus-4-7-thinking[1m]"), "claude-opus-4-7");
+        assert_eq!(
+            normalize_model_name("claude-opus-4-7-thinking[1m]"),
+            "claude-opus-4-7"
+        );
         // [1m] 在中间，不在尾部：不剥离
-        assert_eq!(normalize_model_name("claude-sonnet-5[1m]-agentic"), "claude-sonnet-5");
+        assert_eq!(
+            normalize_model_name("claude-sonnet-5[1m]-agentic"),
+            "claude-sonnet-5"
+        );
     }
 
     #[test]
@@ -3357,19 +3426,48 @@ mod tests {
 
     #[test]
     fn test_format_response_model_id() {
-        assert_eq!(format_response_model_id("claude-sonnet-5", "claude-sonnet-5"), "claude-sonnet-5[1m]");
-        assert_eq!(format_response_model_id("claude-opus-4-8", "claude-opus-4.8"), "claude-opus-4-8[1m]");
-        assert_eq!(format_response_model_id("claude-fable-5", "claude-fable-5"), "claude-fable-5[1m]");
-        assert_eq!(format_response_model_id("claude-sonnet-5[1m]", "claude-sonnet-5"), "claude-sonnet-5[1m]");
-        assert_eq!(format_response_model_id("claude-opus-4-7[1m]", "claude-opus-4.7"), "claude-opus-4-7[1m]");
-        assert_eq!(format_response_model_id("claude-sonnet-4-5", "claude-sonnet-4.5"), "claude-sonnet-4-5");
-        assert_eq!(format_response_model_id("claude-sonnet-4-6", "claude-sonnet-4.6"), "claude-sonnet-4-6");
-        assert_eq!(format_response_model_id("claude-haiku-4-5-20251001", "claude-haiku-4.5"), "claude-haiku-4-5-20251001");
+        assert_eq!(
+            format_response_model_id("claude-sonnet-5", "claude-sonnet-5"),
+            "claude-sonnet-5[1m]"
+        );
+        assert_eq!(
+            format_response_model_id("claude-opus-4-8", "claude-opus-4.8"),
+            "claude-opus-4-8[1m]"
+        );
+        assert_eq!(
+            format_response_model_id("claude-fable-5", "claude-fable-5"),
+            "claude-fable-5[1m]"
+        );
+        assert_eq!(
+            format_response_model_id("claude-sonnet-5[1m]", "claude-sonnet-5"),
+            "claude-sonnet-5[1m]"
+        );
+        assert_eq!(
+            format_response_model_id("claude-opus-4-7[1m]", "claude-opus-4.7"),
+            "claude-opus-4-7[1m]"
+        );
+        assert_eq!(
+            format_response_model_id("claude-sonnet-4-5", "claude-sonnet-4.5"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            format_response_model_id("claude-sonnet-4-6", "claude-sonnet-4.6"),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            format_response_model_id("claude-haiku-4-5-20251001", "claude-haiku-4.5"),
+            "claude-haiku-4-5-20251001"
+        );
     }
 
     #[test]
     fn test_resolve_effort_5_value_model() {
-        for model in &["claude-opus-4.8", "claude-opus-4.7", "claude-sonnet-5", "claude-fable-5"] {
+        for model in &[
+            "claude-opus-4.8",
+            "claude-opus-4.7",
+            "claude-sonnet-5",
+            "claude-fable-5",
+        ] {
             assert_eq!(resolve_effort(model, "low"), Some("low".to_string()));
             assert_eq!(resolve_effort(model, "medium"), Some("medium".to_string()));
             assert_eq!(resolve_effort(model, "high"), Some("high".to_string()));
@@ -3391,8 +3489,14 @@ mod tests {
 
     #[test]
     fn test_resolve_effort_unknown_model_optimistic() {
-        assert_eq!(resolve_effort("claude-unknown-9", "xhigh"), Some("xhigh".to_string()));
-        assert_eq!(resolve_effort("claude-sonnet-4.5", "high"), Some("high".to_string()));
+        assert_eq!(
+            resolve_effort("claude-unknown-9", "xhigh"),
+            Some("xhigh".to_string())
+        );
+        assert_eq!(
+            resolve_effort("claude-sonnet-4.5", "high"),
+            Some("high".to_string())
+        );
     }
 
     #[test]

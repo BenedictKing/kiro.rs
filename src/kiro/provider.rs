@@ -39,8 +39,8 @@ pub struct McpCallResult {
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 2;
 
-/// 总重试次数硬上限（避免无限重试）
-const MAX_TOTAL_RETRIES: usize = 3;
+/// 单次客户端请求的默认最大上游尝试次数（配置 maxTotalAttempts=0 时回退到此值）
+const DEFAULT_MAX_TOTAL_ATTEMPTS: usize = 3;
 
 /// 429 冷却默认时长（无 Retry-After 时使用 CooldownManager 的默认递增策略）
 const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
@@ -126,6 +126,14 @@ impl KiroProvider {
 
         tracing::info!("全局代理配置已热更新，client_cache 已清空");
         Ok(())
+    }
+
+    /// 清空凭据级代理 HTTP Client 缓存
+    ///
+    /// 凭据代理变更后调用，下次请求时自动重建。
+    pub fn clear_client_cache(&self) {
+        self.client_cache.lock().clear();
+        tracing::info!("凭据代理已更新，client_cache 已清空");
     }
 
     /// 热更新默认 endpoint
@@ -264,7 +272,7 @@ impl KiroProvider {
         if available == 0 {
             anyhow::bail!("没有可用的凭据");
         }
-        let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+        let max_retries = self.max_total_attempts(total_credentials);
         let mut last_error: Option<anyhow::Error> = None;
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
 
@@ -446,14 +454,17 @@ impl KiroProvider {
             }
 
             if status.as_u16() == 429 {
-                if Self::is_model_temporarily_unavailable(&body)
-                    && self.token_manager.report_model_unavailable()
-                {
-                    anyhow::bail!(
-                        "MCP 请求失败（模型暂时不可用，已触发熔断）: {} {}",
+                if Self::is_model_temporarily_unavailable(&body) {
+                    // 模型暂时不可用：设置 300s 冷却后切换凭据。
+                    // 跳过 handle_rate_limited_response，避免 RateLimitExceeded 的 60s 冷却
+                    // 覆盖 ModelUnavailable 的 300s 长冷却。
+                    self.token_manager.report_model_unavailable(ctx.id);
+                    last_error = Some(anyhow::anyhow!(
+                        "MCP 请求失败（模型暂时不可用）: {} {}",
                         status,
                         body
-                    );
+                    ));
+                    continue;
                 }
 
                 let cooldown = self.handle_rate_limited_response(ctx.id, &body, retry_after);
@@ -476,16 +487,9 @@ impl KiroProvider {
                     body
                 );
 
-                // 检测 MODEL_TEMPORARILY_UNAVAILABLE 并触发熔断机制
-                if Self::is_model_temporarily_unavailable(&body)
-                    && self.token_manager.report_model_unavailable()
-                {
-                    // 熔断已触发，所有凭据已禁用，立即返回错误
-                    anyhow::bail!(
-                        "MCP 请求失败（模型暂时不可用，已触发熔断）: {} {}",
-                        status,
-                        body
-                    );
+                // 检测 MODEL_TEMPORARILY_UNAVAILABLE：仅冷却当前凭据，不中断重试
+                if Self::is_model_temporarily_unavailable(&body) {
+                    self.token_manager.report_model_unavailable(ctx.id);
                 }
 
                 last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
@@ -516,7 +520,7 @@ impl KiroProvider {
     ///
     /// 重试策略：
     /// - 每个凭据最多重试 MAX_RETRIES_PER_CREDENTIAL 次
-    /// - 总重试次数 = min(凭据数量 × 每凭据重试次数, MAX_TOTAL_RETRIES)
+    /// - 总尝试次数 = min(凭据数量 × 每凭据重试次数, config.maxTotalAttempts)
     /// - 硬上限 3 次，避免无限重试
     async fn call_api_with_retry(
         &self,
@@ -530,7 +534,7 @@ impl KiroProvider {
         if available == 0 {
             anyhow::bail!("没有可用的凭据");
         }
-        let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+        let max_retries = self.max_total_attempts(total_credentials);
         let mut last_error: Option<anyhow::Error> = None;
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
         let api_type = if is_stream { "流式" } else { "非流式" };
@@ -812,15 +816,18 @@ impl KiroProvider {
             }
 
             if status.as_u16() == 429 {
-                if Self::is_model_temporarily_unavailable(&body)
-                    && self.token_manager.report_model_unavailable()
-                {
-                    anyhow::bail!(
-                        "{} API 请求失败（模型暂时不可用，已触发熔断）: {} {}",
+                if Self::is_model_temporarily_unavailable(&body) {
+                    // 模型暂时不可用：设置 300s 冷却后切换凭据。
+                    // 跳过 handle_rate_limited_response，避免 RateLimitExceeded 的 60s 冷却
+                    // 覆盖 ModelUnavailable 的 300s 长冷却。
+                    self.token_manager.report_model_unavailable(ctx.id);
+                    last_error = Some(anyhow::anyhow!(
+                        "{} API 请求失败（模型暂时不可用）: {} {}",
                         api_type,
                         status,
                         body
-                    );
+                    ));
+                    continue;
                 }
 
                 let cooldown = self.handle_rate_limited_response(ctx.id, &body, retry_after);
@@ -850,15 +857,9 @@ impl KiroProvider {
                     body
                 );
 
-                if Self::is_model_temporarily_unavailable(&body)
-                    && self.token_manager.report_model_unavailable()
-                {
-                    anyhow::bail!(
-                        "{} API 请求失败（模型暂时不可用，已触发熔断）: {} {}",
-                        api_type,
-                        status,
-                        body
-                    );
+                // 检测 MODEL_TEMPORARILY_UNAVAILABLE：仅冷却当前凭据，不中断重试
+                if Self::is_model_temporarily_unavailable(&body) {
+                    self.token_manager.report_model_unavailable(ctx.id);
                 }
 
                 last_error = Some(anyhow::anyhow!(
@@ -905,6 +906,22 @@ impl KiroProvider {
                 max_retries
             )
         }))
+    }
+
+    /// 计算单次客户端请求的最大上游尝试次数
+    ///
+    /// 取 `min(凭据数 × 每凭据重试次数, 配置上限)`，至少 1 次。
+    /// 配置 `maxTotalAttempts=0` 时回退到 `DEFAULT_MAX_TOTAL_ATTEMPTS`。
+    fn max_total_attempts(&self, total_credentials: usize) -> usize {
+        let configured = self.token_manager.config().max_total_attempts;
+        let cap = if configured == 0 {
+            DEFAULT_MAX_TOTAL_ATTEMPTS
+        } else {
+            configured
+        };
+        (total_credentials * MAX_RETRIES_PER_CREDENTIAL)
+            .min(cap)
+            .max(1)
     }
 
     fn retry_delay(attempt: usize) -> Duration {

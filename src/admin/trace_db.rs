@@ -347,6 +347,16 @@ impl TraceDb {
         Ok(count as usize)
     }
 
+    /// 清空所有请求日志（含 attempts，依赖 ON DELETE CASCADE）
+    pub fn delete_all_logs(&self) -> anyhow::Result<u64> {
+        let conn =
+            Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.execute("DELETE FROM request_attempts", params![])?;
+        let count = conn.execute("DELETE FROM request_logs", params![])?;
+        tracing::warn!("清空了 {} 条请求日志", count);
+        Ok(count as u64)
+    }
+
     /// 清理过期日志
     pub fn cleanup(&self) -> anyhow::Result<usize> {
         let conn = Connection::open(&self.db_path)?;

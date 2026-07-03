@@ -87,7 +87,7 @@ AppState {
 - 凭据按 `priority` 字段排序，优先使用高优先级凭据
 - 请求失败时 `report_failure()` 触发故障转移到下一个可用凭据
 - 冷却分类管理：`FailureLimit` / `InsufficientBalance` / `ModelUnavailable` / `QuotaExceeded`
-- `MODEL_TEMPORARILY_UNAVAILABLE` 触发全局熔断，禁用所有凭据
+- `MODEL_TEMPORARILY_UNAVAILABLE` 仅冷却触发错误的凭据（per-credential 冷却，不再全局熔断）；仅 `InsufficientBalance`（余额<1.0）保留永久禁用
 
 ## API 端点
 

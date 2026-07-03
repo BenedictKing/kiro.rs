@@ -666,7 +666,7 @@ pub async fn get_models(
             tracing::info!("使用上游模型列表 ({} 个模型)", upstream_models.len());
             upstream_models
                 .into_iter()
-                .map(|m| {
+                .flat_map(|m| {
                     let model_id = m.model_id.clone();
                     let display_name = m.model_name.unwrap_or_else(|| model_id.clone());
                     let max_input = m
@@ -708,7 +708,6 @@ pub async fn get_models(
                         },
                     ]
                 })
-                .flatten()
                 .collect()
         } else {
             tracing::warn!("上游返回空模型列表，使用本地 fallback");

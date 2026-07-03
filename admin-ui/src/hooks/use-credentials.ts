@@ -7,6 +7,7 @@ import {
   setCredentialPriority,
   setCredentialRegion,
   setCredentialEndpoint,
+  updateCredential,
   resetCredentialFailure,
   forceRefreshToken,
   getCredentialBalance,
@@ -25,7 +26,7 @@ import {
   getCooldowns,
   getRequestLogs,
 } from '@/api/credentials'
-import type { AddCredentialRequest, ImportTokenJsonRequest, UpdateGlobalConfigRequest } from '@/types/api'
+import type { AddCredentialRequest, UpdateCredentialRequest, ImportTokenJsonRequest, UpdateGlobalConfigRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -134,6 +135,18 @@ export function useSetEndpoint() {
   return useMutation({
     mutationFn: ({ id, endpoint }: { id: number; endpoint: string | null }) =>
       setCredentialEndpoint(id, endpoint),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 更新凭据元数据
+export function useUpdateCredential() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...req }: { id: number } & UpdateCredentialRequest) =>
+      updateCredential(id, req),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

@@ -10,7 +10,8 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, ImportTokenJsonRequest, SetDisabledRequest, SetEndpointRequest,
-        SetPriorityRequest, SetRegionRequest, SuccessResponse, UpdateProxyConfigRequest,
+        SetPriorityRequest, SetRegionRequest, SuccessResponse, UpdateCredentialRequest,
+        UpdateProxyConfigRequest,
     },
 };
 
@@ -83,6 +84,19 @@ pub async fn set_credential_endpoint(
             id
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/update
+/// 批量更新凭据元数据
+pub async fn update_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<UpdateCredentialRequest>,
+) -> impl IntoResponse {
+    match state.service.update_credential(id, payload) {
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已更新", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
@@ -214,6 +228,11 @@ pub async fn get_cooldowns(State(state): State<AdminState>) -> impl IntoResponse
     Json(state.service.get_cooldown_statuses())
 }
 
+/// DELETE /api/admin/request-logs - 清空所有请求日志
+pub async fn delete_request_logs(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.clear_request_logs())
+}
+
 /// GET /api/admin/request-logs - 获取请求日志
 pub async fn get_request_logs(
     State(state): State<AdminState>,
@@ -224,15 +243,15 @@ pub async fn get_request_logs(
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(100)
         .min(500);
-    let before = params
-        .get("before")
-        .and_then(|v| v.parse::<i64>().ok());
-    let status = params
-        .get("status")
-        .and_then(|v| v.parse::<i32>().ok());
+    let before = params.get("before").and_then(|v| v.parse::<i64>().ok());
+    let status = params.get("status").and_then(|v| v.parse::<i32>().ok());
     let credential = params
         .get("credential_id")
         .and_then(|v| v.parse::<u64>().ok());
 
-    Json(state.service.get_request_logs(limit, before, status, credential))
+    Json(
+        state
+            .service
+            .get_request_logs(limit, before, status, credential),
+    )
 }

@@ -34,6 +34,9 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
   const [promptCacheTtlSeconds, setPromptCacheTtlSeconds] = useState('300')
   const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] = useState(true)
   const [defaultEndpoint, setDefaultEndpoint] = useState('ide')
+  const [maxTotalAttempts, setMaxTotalAttempts] = useState('3')
+  const [serverErrorCooldownSeconds, setServerErrorCooldownSeconds] = useState('120')
+  const [selectionMode, setSelectionMode] = useState('balanced')
 
   // 代理设置
   const [proxyUrl, setProxyUrl] = useState('')
@@ -63,6 +66,9 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
       setPromptCacheTtlSeconds(globalConfig.promptCacheTtlSeconds.toString())
       setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
       setDefaultEndpoint(globalConfig.defaultEndpoint || 'ide')
+      setMaxTotalAttempts(globalConfig.maxTotalAttempts.toString())
+      setServerErrorCooldownSeconds(globalConfig.serverErrorCooldownSeconds.toString())
+      setSelectionMode(globalConfig.selectionMode || 'balanced')
       const c = globalConfig.compression
       setCEnabled(c.enabled)
       setCWhitespace(c.whitespaceCompression)
@@ -113,6 +119,31 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
 
     if (defaultEndpoint !== (globalConfig?.defaultEndpoint || 'ide')) {
       globalPayload.defaultEndpoint = defaultEndpoint
+      hasGlobalChanges = true
+    }
+
+    const newMaxTotalAttempts = parseInt(maxTotalAttempts, 10)
+    if (
+      !Number.isNaN(newMaxTotalAttempts) &&
+      globalConfig &&
+      newMaxTotalAttempts !== globalConfig.maxTotalAttempts
+    ) {
+      globalPayload.maxTotalAttempts = newMaxTotalAttempts
+      hasGlobalChanges = true
+    }
+
+    const newServerErrorCooldownSeconds = parseInt(serverErrorCooldownSeconds, 10)
+    if (
+      !Number.isNaN(newServerErrorCooldownSeconds) &&
+      globalConfig &&
+      newServerErrorCooldownSeconds !== globalConfig.serverErrorCooldownSeconds
+    ) {
+      globalPayload.serverErrorCooldownSeconds = newServerErrorCooldownSeconds
+      hasGlobalChanges = true
+    }
+
+    if (selectionMode !== (globalConfig?.selectionMode || 'balanced')) {
+      globalPayload.selectionMode = selectionMode
       hasGlobalChanges = true
     }
 
@@ -180,10 +211,10 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
 
   // PLACEHOLDER_JSX
 
-  const numInput = (id: string, label: string, value: string, setter: (v: string) => void, hint?: string) => (
+  const numInput = (id: string, label: string, value: string, setter: (v: string) => void, hint?: string, min: number = 0) => (
     <div className="space-y-1">
       <label htmlFor={id} className="text-sm font-medium">{label}</label>
-      <Input id={id} type="number" min={0} value={value} onChange={(e) => setter(e.target.value)} disabled={isPending} />
+      <Input id={id} type="number" min={min} value={value} onChange={(e) => setter(e.target.value)} disabled={isPending} />
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
   )
@@ -241,6 +272,22 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
                   <option value="cli">cli</option>
                 </select>
                 <p className="text-xs text-muted-foreground">凭据未显式指定 endpoint 时使用此默认值</p>
+              </div>
+              {numInput('gcMaxTotalAttempts', '总请求次数', maxTotalAttempts, setMaxTotalAttempts, '单次客户端请求最多尝试上游总次数，最小 1', 1)}
+              {numInput('gcServerErrorCooldown', '超时/服务器错误冷却秒数', serverErrorCooldownSeconds, setServerErrorCooldownSeconds, '连续失败触发 ServerError 冷却时使用的本地秒数，0 表示不冷却')}
+              <div className="space-y-1">
+                <label htmlFor="gcSelectionMode" className="text-sm font-medium">凭据选择策略</label>
+                <select
+                  id="gcSelectionMode"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={selectionMode}
+                  onChange={(e) => setSelectionMode(e.target.value)}
+                  disabled={isPending}
+                >
+                  <option value="balanced">balanced - 负载均衡（使用次数少+余额多优先）</option>
+                  <option value="round_robin">round_robin - 纯轮询（无视使用次数和余额）</option>
+                </select>
+                <p className="text-xs text-muted-foreground">balanced 自动分配流量；round_robin 严格轮流切换凭证</p>
               </div>
             </div>
 

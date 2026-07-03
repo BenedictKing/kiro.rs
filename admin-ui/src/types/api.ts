@@ -31,6 +31,9 @@ export interface CredentialStatusItem {
   apiRegion: string | null
   endpoint?: string | null
   effectiveEndpoint: string
+  hasProxy: boolean
+  hasProxyCredentials: boolean
+  proxyUrl?: string | null
 }
 
 // 余额响应
@@ -116,6 +119,18 @@ export interface SetPriorityRequest {
 
 export interface SetEndpointRequest {
   endpoint: string | null
+}
+
+// 更新凭据请求
+export interface UpdateCredentialRequest {
+  priority?: number
+  region?: string
+  apiRegion?: string
+  machineId?: string
+  endpoint?: string
+  proxyUrl?: string
+  proxyUsername?: string
+  proxyPassword?: string
 }
 
 // 添加凭据请求
@@ -347,6 +362,9 @@ export interface GlobalConfigResponse {
   promptCacheTtlSeconds: number
   promptCacheAccountingEnabled: boolean
   defaultEndpoint: string
+  maxTotalAttempts: number
+  serverErrorCooldownSeconds: number
+  selectionMode: string
   compression: CompressionConfigResponse
 }
 
@@ -370,6 +388,9 @@ export interface UpdateGlobalConfigRequest {
   promptCacheTtlSeconds?: number
   promptCacheAccountingEnabled?: boolean
   defaultEndpoint?: string
+  maxTotalAttempts?: number
+  serverErrorCooldownSeconds?: number
+  selectionMode?: string
   compression?: UpdateCompressionConfigRequest
 }
 

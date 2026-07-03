@@ -576,7 +576,10 @@ pub(crate) async fn list_available_models(
         anyhow::bail!("ListAvailableModels 失败: {} {}", status, body_text);
     }
 
-    tracing::debug!("ListAvailableModels 响应: {}", &body_text[..body_text.len().min(1000)]);
+    tracing::debug!(
+        "ListAvailableModels 响应: {}",
+        &body_text[..body_text.len().min(1000)]
+    );
 
     let data: ListAvailableModelsResponse = serde_json::from_str(&body_text).map_err(|e| {
         tracing::error!(
@@ -598,6 +601,7 @@ pub(crate) async fn list_available_models(
 #[serde(rename_all = "snake_case")]
 pub enum DisableReason {
     /// 连续失败次数过多
+    #[allow(dead_code)]
     FailureLimit,
     /// Token 刷新连续失败次数过多
     RefreshFailureLimit,
@@ -613,6 +617,7 @@ pub enum DisableReason {
     /// 手动禁用
     Manual,
     /// 额度已用尽（如 MONTHLY_REQUEST_COUNT）
+    #[allow(dead_code)]
     QuotaExceeded,
 }
 
@@ -732,6 +737,12 @@ pub struct CredentialEntrySnapshot {
     pub api_region: Option<String>,
     /// 最终生效的 endpoint 名称
     pub endpoint: Option<String>,
+    /// 是否有凭据级代理配置
+    pub has_proxy: bool,
+    /// 凭据级代理 URL
+    pub proxy_url: Option<String>,
+    /// 是否有代理认证凭据
+    pub has_proxy_credentials: bool,
 }
 
 /// 凭据管理器状态快照
@@ -865,7 +876,8 @@ struct RateLimitedCredentialDiag {
 /// 每个凭据最大 API 调用失败次数
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 
-/// MODEL_TEMPORARILY_UNAVAILABLE 触发全局禁用的阈值
+/// MODEL_TEMPORARILY_UNAVAILABLE 触发全局禁用的阈值（保留作历史兼容/观测阈值）
+#[allow(dead_code)]
 const MODEL_UNAVAILABLE_THRESHOLD: u32 = 2;
 
 /// 全局禁用恢复时间（分钟）
@@ -1101,6 +1113,22 @@ impl MultiTokenManager {
     /// 热更新默认 endpoint
     pub fn update_default_endpoint(&self, default_endpoint: String) {
         self.config.write().default_endpoint = default_endpoint;
+    }
+
+    /// 热更新重试和冷却配置
+    pub fn update_retry_cooldown_config(
+        &self,
+        max_total_attempts: usize,
+        server_error_cooldown_seconds: u64,
+    ) {
+        let mut config = self.config.write();
+        config.max_total_attempts = max_total_attempts;
+        config.server_error_cooldown_seconds = server_error_cooldown_seconds;
+    }
+
+    /// 热更新凭据选择策略
+    pub fn update_selection_mode(&self, selection_mode: String) {
+        self.config.write().selection_mode = selection_mode;
     }
 
     /// 热更新单凭据目标请求速率（RPM）
@@ -1471,9 +1499,16 @@ impl MultiTokenManager {
                 })
                 .map(|(id, _, _)| *id)
                 .collect();
-            let id = self
-                .select_best_candidate_id(&candidate_ids)
-                .ok_or_else(|| anyhow::anyhow!("没有可用凭据"))?;
+            let id = {
+                if self.config.read().selection_mode == "round_robin" && candidate_ids.len() > 1 {
+                    let idx = self.selection_rr.fetch_add(1, Ordering::Relaxed) as usize
+                        % candidate_ids.len();
+                    Some(candidate_ids[idx])
+                } else {
+                    self.select_best_candidate_id(&candidate_ids)
+                }
+            }
+            .ok_or_else(|| anyhow::anyhow!("没有可用凭据"))?;
 
             // 冷却/速率限制：把“临时不可用”的凭据视为本轮不可选，从而自然分流到其他凭据。
             if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(id) {
@@ -2244,8 +2279,9 @@ impl MultiTokenManager {
 
     /// 报告指定凭据 API 调用失败
     ///
-    /// 增加失败计数，达到阈值时禁用凭据
-    /// 返回是否还有可用凭据可以重试
+    /// 累计失败计数；达到阈值时让该凭据进入冷却（而非永久禁用），并重置失败计数。
+    /// 成功后 `report_success()` 也会重置失败计数。
+    /// 返回是否还有可用凭据可以重试。
     ///
     /// # Arguments
     /// * `id` - 凭据 ID（来自 CallContext）
@@ -2264,24 +2300,43 @@ impl MultiTokenManager {
             let failure_count = entry.failure_count;
 
             tracing::warn!(
-                "凭据 #{} API 调用失败（{}/{}）",
+                "凭据 #{} API 调用失败（{}/{})",
                 id,
                 failure_count,
                 MAX_FAILURES_PER_CREDENTIAL
             );
 
             if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
-                entry.disabled = true;
-                entry.auto_heal_reason = Some(AutoHealReason::TooManyFailures);
-                entry.disable_reason = Some(DisableReason::FailureLimit);
-                tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
-
-                // 移除该凭据的亲和性绑定
+                // 达到阈值：进入冷却而非禁用。重置失败计数，避免冷却结束后一次失败立即再冷却。
+                entry.failure_count = 0;
+                let has_available = entries.iter().any(|e| !e.disabled);
                 drop(entries);
+
                 self.affinity.remove_by_credential(id);
 
-                let entries = self.entries.lock();
-                return entries.iter().any(|e| !e.disabled);
+                let cooldown_secs = self.config.read().server_error_cooldown_seconds;
+                if cooldown_secs > 0 {
+                    self.cooldown_manager.set_cooldown_with_duration(
+                        id,
+                        CooldownReason::ServerError,
+                        Some(StdDuration::from_secs(cooldown_secs)),
+                    );
+                    tracing::warn!(
+                        "凭据 #{} 已连续失败 {} 次，进入 {}s 冷却",
+                        id,
+                        failure_count,
+                        cooldown_secs
+                    );
+                } else {
+                    tracing::warn!(
+                        "凭据 #{} 已连续失败 {} 次，server_error_cooldown_seconds=0 未触发冷却",
+                        id,
+                        failure_count
+                    );
+                }
+
+                self.save_stats_debounced();
+                return has_available;
             }
 
             // 检查是否还有可用凭据
@@ -2294,11 +2349,11 @@ impl MultiTokenManager {
     /// 报告指定凭据额度已用尽
     ///
     /// 用于处理 402 Payment Required 且 reason 为 `MONTHLY_REQUEST_COUNT` 的场景：
-    /// - 立即禁用该凭据（不等待连续失败阈值）
+    /// - 设置长冷却（不永久禁用），等待配额恢复后自动重试
     /// - 切换到下一个可用凭据继续重试
     /// - 返回是否还有可用凭据
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
-        let result = {
+        let has_available = {
             let mut entries = self.entries.lock();
 
             let entry = match entries.iter_mut().find(|e| e.id == id) {
@@ -2310,42 +2365,46 @@ impl MultiTokenManager {
                 return entries.iter().any(|e| !e.disabled);
             }
 
-            entry.disabled = true;
-            entry.auto_heal_reason = Some(AutoHealReason::QuotaExceeded);
-            entry.disable_reason = Some(DisableReason::QuotaExceeded);
             entry.last_used_at = Some(Utc::now().to_rfc3339());
-            // 设为阈值，便于在管理面板中直观看到该凭据已不可用
+            // 设为阈值，便于在管理面板中直观看到该凭据已接近不可用
             entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
-
-            tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用", id);
 
             entries.iter().any(|e| !e.disabled)
         };
+
+        // 额度已用尽：进入长冷却（本地 QuotaExhausted 默认 24h 且持久化，重启不丢失）
+        self.cooldown_manager
+            .set_cooldown(id, CooldownReason::QuotaExhausted);
+        // 清除亲和性绑定，避免后续请求仍命中已冷却的凭据而空转
+        self.affinity.remove_by_credential(id);
+        tracing::warn!(
+            "凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），进入冷却等待配额恢复",
+            id
+        );
         self.save_stats_debounced();
-        result
+        has_available
     }
 
     /// 报告 MODEL_TEMPORARILY_UNAVAILABLE 错误
     ///
-    /// 累计达到阈值后禁用所有凭据，5分钟后自动恢复
-    /// 返回是否触发了全局禁用
-    pub fn report_model_unavailable(&self) -> bool {
+    /// 对触发错误的凭据设置冷却，不再触发全局熔断。
+    /// 返回 false（不中断重试流程，让外层切到下一个凭据）。
+    pub fn report_model_unavailable(&self, id: u64) -> bool {
         let count = self.model_unavailable_count.fetch_add(1, Ordering::SeqCst) + 1;
         tracing::warn!(
-            "MODEL_TEMPORARILY_UNAVAILABLE 错误（{}/{}）",
-            count,
-            MODEL_UNAVAILABLE_THRESHOLD
+            credential_id = %id,
+            "MODEL_TEMPORARILY_UNAVAILABLE 错误（累计 {} 次），凭据进入冷却",
+            count
         );
-
-        if count >= MODEL_UNAVAILABLE_THRESHOLD {
-            self.disable_all_credentials(DisableReason::ModelUnavailable);
-            true
-        } else {
-            false
-        }
+        self.cooldown_manager
+            .set_cooldown(id, CooldownReason::ModelUnavailable);
+        false
     }
 
     /// 禁用所有凭据
+    ///
+    /// 改为 per-credential 冷却后无调用方，保留作防御性兜底。
+    #[allow(dead_code)]
     fn disable_all_credentials(&self, reason: DisableReason) {
         let mut entries = self.entries.lock();
         let mut recovery_time = self.global_recovery_time.lock();
@@ -2466,10 +2525,10 @@ impl MultiTokenManager {
         // 检查缓存是否有效（5 分钟内）
         {
             let cache_time = self.models_cache_time.lock();
-            if let Some(t) = *cache_time {
-                if t.elapsed() < StdDuration::from_secs(300) {
-                    return self.cached_models.lock().clone();
-                }
+            if let Some(t) = *cache_time
+                && t.elapsed() < StdDuration::from_secs(300)
+            {
+                return self.cached_models.lock().clone();
             }
         }
 
@@ -2499,8 +2558,7 @@ impl MultiTokenManager {
                     .iter()
                     .find(|e| e.id == *id)
                     .map(|e| {
-                        if e
-                            .credentials
+                        if e.credentials
                             .auth_method
                             .as_deref()
                             .map(|m| canonicalize_auth_method_value(m) == "social")
@@ -2539,7 +2597,8 @@ impl MultiTokenManager {
                 }
             };
 
-            match list_available_models(&ctx.credentials, &config, &ctx.token, proxy.as_ref()).await {
+            match list_available_models(&ctx.credentials, &config, &ctx.token, proxy.as_ref()).await
+            {
                 Ok(models) => {
                     tracing::info!(
                         "从上游获取到 {} 个可用模型 (凭据 #{})",
@@ -2685,6 +2744,21 @@ impl MultiTokenManager {
                         region: e.credentials.region.clone(),
                         api_region: e.credentials.api_region.clone(),
                         endpoint: e.credentials.endpoint.clone(),
+                        has_proxy: e
+                            .credentials
+                            .proxy_url
+                            .as_ref()
+                            .is_some_and(|u| !u.is_empty() && !u.eq_ignore_ascii_case("direct")),
+                        proxy_url: e.credentials.proxy_url.clone(),
+                        has_proxy_credentials: e
+                            .credentials
+                            .proxy_username
+                            .as_ref()
+                            .is_some_and(|u| !u.is_empty())
+                            && e.credentials
+                                .proxy_password
+                                .as_ref()
+                                .is_some_and(|p| !p.is_empty()),
                     }
                 })
                 .collect(),
@@ -2761,6 +2835,58 @@ impl MultiTokenManager {
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.credentials.endpoint = endpoint;
+        }
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 批量更新凭据元数据（Admin API）
+    ///
+    /// 仅更新非敏感字段（优先级、Region、endpoint、代理、MachineId）。
+    /// 字段为 `Option<Option<T>>`：外层 `None` 表示不修改，内层 `None` 表示清空。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_credential(
+        &self,
+        id: u64,
+        priority: Option<u32>,
+        region: Option<Option<String>>,
+        api_region: Option<Option<String>>,
+        machine_id: Option<Option<String>>,
+        endpoint: Option<Option<String>>,
+        proxy_url: Option<Option<String>>,
+        proxy_username: Option<Option<String>>,
+        proxy_password: Option<Option<String>>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            if let Some(p) = priority {
+                entry.credentials.priority = p;
+            }
+            if let Some(r) = region {
+                entry.credentials.region = r;
+            }
+            if let Some(ar) = api_region {
+                entry.credentials.api_region = ar;
+            }
+            if let Some(mi) = machine_id {
+                entry.credentials.machine_id = mi;
+            }
+            if let Some(ep) = endpoint {
+                entry.credentials.endpoint = ep;
+            }
+            if let Some(pu) = proxy_url {
+                entry.credentials.proxy_url = pu;
+            }
+            if let Some(pu) = proxy_username {
+                entry.credentials.proxy_username = pu;
+            }
+            if let Some(pp) = proxy_password {
+                entry.credentials.proxy_password = pp;
+            }
         }
         self.persist_credentials()?;
         Ok(())
@@ -3525,21 +3651,20 @@ mod tests {
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
         // 凭据会自动分配 ID（从 1 开始）
-        // MAX_FAILURES_PER_CREDENTIAL = 3，所以前两次失败不会禁用
+        // report_failure 不再禁用凭据，但达到阈值时设置冷却
+        for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
+            assert!(manager.report_failure(1));
+        }
+        // 凭据保持可用（未禁用），但进入冷却
+        assert_eq!(manager.available_count(), 2);
+        assert!(manager.cooldown_manager().check_cooldown(1).is_some());
+
+        // 成功后重置失败计数
+        manager.report_success(1);
+
+        // 再失败仍不会禁用
         assert!(manager.report_failure(1));
         assert_eq!(manager.available_count(), 2);
-        assert!(manager.report_failure(1));
-        assert_eq!(manager.available_count(), 2);
-
-        // 第三次失败会禁用第一个凭据
-        assert!(manager.report_failure(1));
-        assert_eq!(manager.available_count(), 1);
-
-        // 继续失败第二个凭据（使用 ID 2），需要 3 次才会禁用
-        assert!(manager.report_failure(2));
-        assert!(manager.report_failure(2));
-        assert!(!manager.report_failure(2)); // 所有凭据都禁用了
-        assert_eq!(manager.available_count(), 0);
     }
 
     #[test]
@@ -3573,7 +3698,7 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
-        // 凭据会自动分配 ID（从 1 开始）
+        // report_failure 改为冷却后不再导致全灭：连续失败只会让凭据进入冷却，仍 available
         for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
             manager.report_failure(1);
         }
@@ -3581,12 +3706,10 @@ mod tests {
             manager.report_failure(2);
         }
 
-        assert_eq!(manager.available_count(), 0);
-
-        // 应触发自愈：重置失败计数并重新启用，避免必须重启进程
-        let ctx = manager.acquire_context().await.unwrap();
-        assert!(ctx.token == "t1" || ctx.token == "t2");
+        // 凭据未被禁用，仍可获取上下文（冷却中的凭据会被跳过，但未冷却或冷却过期后可用）
         assert_eq!(manager.available_count(), 2);
+        assert!(manager.cooldown_manager().check_cooldown(1).is_some());
+        assert!(manager.cooldown_manager().check_cooldown(2).is_some());
     }
 
     #[tokio::test]
@@ -3640,18 +3763,19 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
-        // 凭据会自动分配 ID（从 1 开始）
+        // report_quota_exhausted 不再禁用凭据，仅设置冷却
         assert_eq!(manager.available_count(), 2);
         assert!(manager.report_quota_exhausted(1));
-        assert_eq!(manager.available_count(), 1);
+        assert_eq!(manager.available_count(), 2);
+        assert!(manager.cooldown_manager().check_cooldown(1).is_some());
 
-        // 再禁用第二个后，无可用凭据
-        assert!(!manager.report_quota_exhausted(2));
-        assert_eq!(manager.available_count(), 0);
+        assert!(manager.report_quota_exhausted(2));
+        assert_eq!(manager.available_count(), 2);
+        assert!(manager.cooldown_manager().check_cooldown(2).is_some());
     }
 
-    #[tokio::test]
-    async fn test_multi_token_manager_quota_disabled_is_not_auto_recovered() {
+    #[test]
+    fn test_multi_token_manager_report_model_unavailable_cools_single_credential() {
         let config = Config::default();
         let cred1 = KiroCredentials::default();
         let cred2 = KiroCredentials::default();
@@ -3659,17 +3783,37 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
+        // MODEL_TEMPORARILY_UNAVAILABLE 仅冷却触发的凭据，不全局熔断
+        assert!(!manager.report_model_unavailable(1));
+        assert_eq!(manager.available_count(), 2);
+        assert!(manager.cooldown_manager().check_cooldown(1).is_some());
+        // 其他凭据不受影响
+        assert!(manager.cooldown_manager().check_cooldown(2).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_quota_cooldown_blocks_acquire() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        // 两个凭据都因配额耗尽进入冷却：available_count 仍为 2（未禁用），但 acquire_context 会因冷却阻塞
         manager.report_quota_exhausted(1);
         manager.report_quota_exhausted(2);
-        assert_eq!(manager.available_count(), 0);
+        assert_eq!(manager.available_count(), 2);
+        assert!(manager.cooldown_manager().check_cooldown(1).is_some());
+        assert!(manager.cooldown_manager().check_cooldown(2).is_some());
 
+        // 冷却中的凭据无法获取上下文
         let err = manager.acquire_context().await.err().unwrap().to_string();
         assert!(
-            err.contains("所有凭据均已禁用"),
-            "错误应提示所有凭据禁用，实际: {}",
+            err.contains("冷却") || err.contains("速率限制"),
+            "错误应提示冷却/速率限制，实际: {}",
             err
         );
-        assert_eq!(manager.available_count(), 0);
     }
 
     #[tokio::test]
@@ -3698,8 +3842,8 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
-        // 禁用 #2，仅保留一个可用凭据
-        assert!(manager.report_quota_exhausted(2));
+        // 手动禁用 #2（模拟旧式永久禁用），仅保留一个可用凭据
+        manager.set_disabled(2, true).unwrap();
         assert_eq!(manager.available_count(), 1);
 
         // 预先占位：让 #1 在下一次 acquire_context() 时必然触发速率限制

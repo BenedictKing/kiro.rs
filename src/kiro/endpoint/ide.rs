@@ -187,7 +187,10 @@ impl KiroEndpoint for IdeEndpoint {
         Ok(UsageRequestParts { url, headers })
     }
 
-    fn list_models_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts> {
+    fn list_models_request_parts(
+        &self,
+        ctx: &RequestContext<'_>,
+    ) -> anyhow::Result<UsageRequestParts> {
         let region = ctx.credentials.effective_api_region(ctx.config);
         let host = format!("codewhisperer.{}.amazonaws.com", region);
         let mut url = format!(

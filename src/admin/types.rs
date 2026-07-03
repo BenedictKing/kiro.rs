@@ -60,6 +60,12 @@ pub struct CredentialStatusItem {
     pub endpoint: Option<String>,
     /// 最终生效的 endpoint 名称
     pub effective_endpoint: String,
+    /// 是否有凭据级代理配置
+    pub has_proxy: bool,
+    /// 凭据级代理 URL（用于编辑对话框预填充）
+    pub proxy_url: Option<String>,
+    /// 是否有代理认证凭据
+    pub has_proxy_credentials: bool,
 }
 
 // ============ 操作请求 ============
@@ -96,6 +102,28 @@ pub struct SetRegionRequest {
 pub struct SetEndpointRequest {
     /// endpoint 名称，空字符串或 null 表示回退到 defaultEndpoint
     pub endpoint: Option<String>,
+}
+
+/// 更新凭据请求（编辑已有凭据的元数据）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCredentialRequest {
+    /// 优先级
+    pub priority: Option<u32>,
+    /// Region（用于 Token 刷新）
+    pub region: Option<String>,
+    /// API Region（单独覆盖 API 请求）
+    pub api_region: Option<String>,
+    /// Machine ID
+    pub machine_id: Option<String>,
+    /// 凭据级 endpoint
+    pub endpoint: Option<String>,
+    /// 凭据级代理 URL
+    pub proxy_url: Option<String>,
+    /// 凭据级代理用户名
+    pub proxy_username: Option<String>,
+    /// 凭据级代理密码
+    pub proxy_password: Option<String>,
 }
 
 /// 添加凭据请求
@@ -311,6 +339,14 @@ pub struct ImportTokenJsonResponse {
     pub items: Vec<ImportItemResult>,
 }
 
+/// 清空请求日志响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearRequestLogsResponse {
+    /// 本次清空的日志条数
+    pub deleted: u64,
+}
+
 /// 导入汇总
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -403,6 +439,12 @@ pub struct GlobalConfigResponse {
     pub prompt_cache_accounting_enabled: bool,
     /// 默认端点名称（凭据未显式指定 endpoint 时使用）
     pub default_endpoint: String,
+    /// 单次客户端请求最多尝试请求上游的总次数
+    pub max_total_attempts: usize,
+    /// 连续失败触发服务器错误冷却的本地冷却秒数
+    pub server_error_cooldown_seconds: u64,
+    /// 凭据选择策略: "balanced" 或 "round_robin"
+    pub selection_mode: String,
     /// 压缩配置
     pub compression: CompressionConfigResponse,
 }
@@ -438,6 +480,12 @@ pub struct UpdateGlobalConfigRequest {
     pub prompt_cache_accounting_enabled: Option<bool>,
     /// 默认端点名称（可选）
     pub default_endpoint: Option<String>,
+    /// 单次客户端请求最多尝试请求上游的总次数（可选）
+    pub max_total_attempts: Option<usize>,
+    /// 连续失败触发服务器错误冷却的本地冷却秒数（可选）
+    pub server_error_cooldown_seconds: Option<u64>,
+    /// 凭据选择策略: "balanced" 或 "round_robin"（可选）
+    pub selection_mode: Option<String>,
     /// 压缩配置（可选）
     pub compression: Option<UpdateCompressionConfigRequest>,
 }

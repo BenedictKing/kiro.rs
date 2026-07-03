@@ -8,6 +8,7 @@ import type {
   SetDisabledRequest,
   SetPriorityRequest,
   SetEndpointRequest,
+  UpdateCredentialRequest,
   AddCredentialRequest,
   AddCredentialResponse,
   CredentialStatsResponse,
@@ -100,6 +101,15 @@ export async function setCredentialEndpoint(
     `/credentials/${id}/endpoint`,
     { endpoint } as SetEndpointRequest
   )
+  return data
+}
+
+// 更新凭据元数据
+export async function updateCredential(
+  id: number,
+  req: UpdateCredentialRequest
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/update`, req)
   return data
 }
 

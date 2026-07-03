@@ -122,6 +122,9 @@ impl AdminService {
                     api_region: entry.api_region,
                     endpoint,
                     effective_endpoint,
+                    has_proxy: entry.has_proxy,
+                    proxy_url: entry.proxy_url,
+                    has_proxy_credentials: entry.has_proxy_credentials,
                 }
             })
             .collect();
@@ -189,6 +192,57 @@ impl AdminService {
         self.token_manager
             .set_endpoint(id, endpoint)
             .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 批量更新凭据元数据
+    pub fn update_credential(
+        &self,
+        id: u64,
+        req: super::types::UpdateCredentialRequest,
+    ) -> Result<(), AdminServiceError> {
+        // endpoint 校验
+        if let Some(endpoint) = &req.endpoint {
+            let trimmed = endpoint.trim();
+            if !trimmed.is_empty() && !self.known_endpoints.contains(trimmed) {
+                let mut known: Vec<&str> =
+                    self.known_endpoints.iter().map(|s| s.as_str()).collect();
+                known.sort_unstable();
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "endpoint 必须是已注册值，已注册: {:?}，收到: {}",
+                    known, trimmed
+                )));
+            }
+        }
+
+        // 代理变更后需清空 HTTP Client 缓存（在调用 token_manager 前记录）
+        let proxy_changed =
+            req.proxy_url.is_some() || req.proxy_username.is_some() || req.proxy_password.is_some();
+
+        // trim 空字符串转 None（与 set_region 一致）
+        let trim_to_none = |s: String| {
+            let trimmed = s.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        };
+
+        self.token_manager
+            .update_credential(
+                id,
+                req.priority,
+                req.region.map(trim_to_none),
+                req.api_region.map(trim_to_none),
+                req.machine_id.map(trim_to_none),
+                req.endpoint.map(trim_to_none),
+                req.proxy_url.map(trim_to_none),
+                req.proxy_username.map(trim_to_none),
+                req.proxy_password.map(trim_to_none),
+            )
+            .map_err(|e| self.classify_error(e, id))?;
+
+        if proxy_changed && let Some(provider) = &self.kiro_provider {
+            provider.clear_client_cache();
+        }
+
+        Ok(())
     }
 
     /// 重置失败计数并重新启用
@@ -828,6 +882,9 @@ impl AdminService {
             prompt_cache_ttl_seconds: config.prompt_cache_ttl_seconds,
             prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
             default_endpoint: config.default_endpoint.clone(),
+            max_total_attempts: config.max_total_attempts,
+            server_error_cooldown_seconds: config.server_error_cooldown_seconds,
+            selection_mode: config.selection_mode.clone(),
             compression: super::types::CompressionConfigResponse {
                 enabled: c.enabled,
                 whitespace_compression: c.whitespace_compression,
@@ -905,6 +962,30 @@ impl AdminService {
                 Self::apply_compression_fields(&mut config.compression, c);
             }
 
+            if let Some(max_total_attempts) = req.max_total_attempts {
+                if max_total_attempts == 0 {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "总请求次数必须大于 0".to_string(),
+                    ));
+                }
+                config.max_total_attempts = max_total_attempts;
+            }
+
+            if let Some(server_error_cooldown_seconds) = req.server_error_cooldown_seconds {
+                config.server_error_cooldown_seconds = server_error_cooldown_seconds;
+            }
+
+            if let Some(ref mode) = req.selection_mode {
+                let trimmed = mode.trim();
+                if !matches!(trimmed, "balanced" | "round_robin") {
+                    return Err(AdminServiceError::InvalidRequest(format!(
+                        "selectionMode 必须是 balanced 或 round_robin，收到: {}",
+                        trimmed
+                    )));
+                }
+                config.selection_mode = trimmed.to_string();
+            }
+
             config
                 .save()
                 .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
@@ -941,6 +1022,20 @@ impl AdminService {
                 req.prompt_cache_ttl_seconds,
                 req.prompt_cache_accounting_enabled,
             );
+        }
+
+        // 热更新重试/冷却配置
+        if req.max_total_attempts.is_some() || req.server_error_cooldown_seconds.is_some() {
+            self.token_manager.update_retry_cooldown_config(
+                config.max_total_attempts,
+                config.server_error_cooldown_seconds,
+            );
+        }
+
+        // 热更新凭据选择策略
+        if req.selection_mode.is_some() {
+            self.token_manager
+                .update_selection_mode(config.selection_mode.clone());
         }
 
         // 热更新压缩配置到运行时 Arc<RwLock<CompressionConfig>>
@@ -999,7 +1094,10 @@ impl AdminService {
         let available = snapshot.available as u64;
         let entries = &snapshot.entries;
 
-        let total_requests: u64 = entries.iter().map(|e| e.success_count + e.total_failure_count).sum();
+        let total_requests: u64 = entries
+            .iter()
+            .map(|e| e.success_count + e.total_failure_count)
+            .sum();
         let total_success: u64 = entries.iter().map(|e| e.success_count).sum();
         let total_failures: u64 = entries.iter().map(|e| e.total_failure_count).sum();
         let today_requests: u64 = entries.iter().map(|e| e.daily_count as u64).sum();
@@ -1086,6 +1184,20 @@ impl AdminService {
             }),
         }
     }
+
+    /// 清空所有请求日志
+    pub fn clear_request_logs(&self) -> super::types::ClearRequestLogsResponse {
+        match &self.trace_db {
+            Some(db) => match db.delete_all_logs() {
+                Ok(deleted) => super::types::ClearRequestLogsResponse { deleted },
+                Err(e) => {
+                    tracing::warn!("清空请求日志失败: {}", e);
+                    super::types::ClearRequestLogsResponse { deleted: 0 }
+                }
+            },
+            None => super::types::ClearRequestLogsResponse { deleted: 0 },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1148,17 +1260,27 @@ mod tests {
         serde_json::from_str(&content).unwrap()
     }
 
+    fn update_global_config_request() -> super::super::types::UpdateGlobalConfigRequest {
+        super::super::types::UpdateGlobalConfigRequest {
+            region: None,
+            credential_rpm: None,
+            prompt_cache_ttl_seconds: None,
+            prompt_cache_accounting_enabled: None,
+            default_endpoint: None,
+            max_total_attempts: None,
+            server_error_cooldown_seconds: None,
+            selection_mode: None,
+            compression: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_update_global_config_default_endpoint_valid() {
         let service = create_test_service();
 
         let req = super::super::types::UpdateGlobalConfigRequest {
-            region: None,
-            credential_rpm: None,
-            prompt_cache_ttl_seconds: None,
-            prompt_cache_accounting_enabled: None,
             default_endpoint: Some("cli".to_string()),
-            compression: None,
+            ..update_global_config_request()
         };
 
         let result = service.update_global_config(req).await;
@@ -1177,12 +1299,8 @@ mod tests {
         let service = create_test_service();
 
         let req = super::super::types::UpdateGlobalConfigRequest {
-            region: None,
-            credential_rpm: None,
-            prompt_cache_ttl_seconds: None,
-            prompt_cache_accounting_enabled: None,
             default_endpoint: Some("".to_string()),
-            compression: None,
+            ..update_global_config_request()
         };
 
         let result = service.update_global_config(req).await;
@@ -1200,12 +1318,8 @@ mod tests {
         let service = create_test_service();
 
         let req = super::super::types::UpdateGlobalConfigRequest {
-            region: None,
-            credential_rpm: None,
-            prompt_cache_ttl_seconds: None,
-            prompt_cache_accounting_enabled: None,
             default_endpoint: Some("   ".to_string()),
-            compression: None,
+            ..update_global_config_request()
         };
 
         let result = service.update_global_config(req).await;
@@ -1223,12 +1337,8 @@ mod tests {
         let service = create_test_service();
 
         let req = super::super::types::UpdateGlobalConfigRequest {
-            region: None,
-            credential_rpm: None,
-            prompt_cache_ttl_seconds: None,
-            prompt_cache_accounting_enabled: None,
             default_endpoint: Some("unknown".to_string()),
-            compression: None,
+            ..update_global_config_request()
         };
 
         let result = service.update_global_config(req).await;
@@ -1243,12 +1353,8 @@ mod tests {
         let service = create_test_service();
 
         let req = super::super::types::UpdateGlobalConfigRequest {
-            region: None,
-            credential_rpm: None,
-            prompt_cache_ttl_seconds: None,
-            prompt_cache_accounting_enabled: None,
             default_endpoint: Some("  cli  ".to_string()),
-            compression: None,
+            ..update_global_config_request()
         };
 
         let result = service.update_global_config(req).await;
@@ -1267,5 +1373,203 @@ mod tests {
         let service = create_test_service();
         let config = service.get_global_config();
         assert_eq!(config.default_endpoint, "ide"); // Config::default() 的默认值
+    }
+
+    #[test]
+    fn test_get_global_config_includes_retry_cooldown_settings() {
+        let service = create_test_service();
+        let config = service.get_global_config();
+        assert_eq!(config.max_total_attempts, 3);
+        assert_eq!(config.server_error_cooldown_seconds, 120);
+        assert_eq!(config.selection_mode, "balanced");
+    }
+
+    #[tokio::test]
+    async fn test_update_global_config_retry_cooldown_settings() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateGlobalConfigRequest {
+            max_total_attempts: Some(5),
+            server_error_cooldown_seconds: Some(30),
+            selection_mode: Some("round_robin".to_string()),
+            ..update_global_config_request()
+        };
+
+        let result = service.update_global_config(req).await;
+        assert!(result.is_ok());
+
+        let config = service.get_global_config();
+        assert_eq!(config.max_total_attempts, 5);
+        assert_eq!(config.server_error_cooldown_seconds, 30);
+        assert_eq!(config.selection_mode, "round_robin");
+        assert_eq!(service.token_manager.config().max_total_attempts, 5);
+        assert_eq!(
+            service.token_manager.config().server_error_cooldown_seconds,
+            30
+        );
+        assert_eq!(service.token_manager.config().selection_mode, "round_robin");
+
+        let persisted = read_persisted_config(&service);
+        assert_eq!(persisted.max_total_attempts, 5);
+        assert_eq!(persisted.server_error_cooldown_seconds, 30);
+        assert_eq!(persisted.selection_mode, "round_robin");
+    }
+
+    #[tokio::test]
+    async fn test_update_global_config_rejects_zero_max_total_attempts() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateGlobalConfigRequest {
+            max_total_attempts: Some(0),
+            ..update_global_config_request()
+        };
+
+        let result = service.update_global_config(req).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("总请求次数必须大于 0")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_global_config_rejects_invalid_selection_mode() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateGlobalConfigRequest {
+            selection_mode: Some("random".to_string()),
+            ..update_global_config_request()
+        };
+
+        let result = service.update_global_config(req).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("selectionMode"));
+    }
+
+    #[tokio::test]
+    async fn test_update_global_config_accepts_zero_server_error_cooldown() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateGlobalConfigRequest {
+            server_error_cooldown_seconds: Some(0),
+            ..update_global_config_request()
+        };
+
+        let result = service.update_global_config(req).await;
+        assert!(result.is_ok());
+
+        let config = service.get_global_config();
+        assert_eq!(config.server_error_cooldown_seconds, 0);
+        assert_eq!(
+            service.token_manager.config().server_error_cooldown_seconds,
+            0
+        );
+    }
+
+    #[test]
+    fn test_update_credential_updates_priority_and_region() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateCredentialRequest {
+            priority: Some(5),
+            region: Some("eu-west-1".to_string()),
+            ..Default::default()
+        };
+
+        let result = service.update_credential(1, req);
+        assert!(result.is_ok());
+
+        let cred = service
+            .get_all_credentials()
+            .credentials
+            .into_iter()
+            .find(|c| c.id == 1)
+            .unwrap();
+        assert_eq!(cred.priority, 5);
+        assert_eq!(cred.region.as_deref(), Some("eu-west-1"));
+    }
+
+    #[test]
+    fn test_update_credential_rejects_unknown_endpoint() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateCredentialRequest {
+            endpoint: Some("unknown".to_string()),
+            ..Default::default()
+        };
+
+        let result = service.update_credential(1, req);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("endpoint 必须是已注册值")
+        );
+    }
+
+    #[test]
+    fn test_update_credential_empty_string_clears_region() {
+        let service = create_test_service();
+
+        // 先设置 region
+        let set_req = super::super::types::UpdateCredentialRequest {
+            region: Some("eu-west-1".to_string()),
+            ..Default::default()
+        };
+        service.update_credential(1, set_req).unwrap();
+
+        // 用空字符串清空
+        let clear_req = super::super::types::UpdateCredentialRequest {
+            region: Some(String::new()),
+            ..Default::default()
+        };
+        service.update_credential(1, clear_req).unwrap();
+
+        let cred = service
+            .get_all_credentials()
+            .credentials
+            .into_iter()
+            .find(|c| c.id == 1)
+            .unwrap();
+        assert_eq!(cred.region, None);
+    }
+
+    #[test]
+    fn test_update_credential_proxy_change_clears_client_cache() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateCredentialRequest {
+            proxy_url: Some("http://127.0.0.1:7890".to_string()),
+            ..Default::default()
+        };
+
+        let result = service.update_credential(1, req);
+        assert!(result.is_ok());
+
+        // 凭据代理字段已更新
+        let cred = service
+            .get_all_credentials()
+            .credentials
+            .into_iter()
+            .find(|c| c.id == 1)
+            .unwrap();
+        assert_eq!(cred.proxy_url.as_deref(), Some("http://127.0.0.1:7890"));
+        assert!(cred.has_proxy);
+    }
+
+    #[test]
+    fn test_update_credential_unknown_id_returns_error() {
+        let service = create_test_service();
+
+        let req = super::super::types::UpdateCredentialRequest {
+            priority: Some(1),
+            ..Default::default()
+        };
+
+        let result = service.update_credential(999, req);
+        assert!(result.is_err());
     }
 }

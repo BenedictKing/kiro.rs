@@ -7,11 +7,12 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_cached_balances, get_cooldowns, get_credential_balance, get_global_config,
-        get_proxy_config, get_request_logs, get_stats, import_token_json, reset_failure_count,
-        set_credential_disabled, set_credential_endpoint, set_credential_priority,
-        set_credential_region, update_global_config, update_proxy_config,
+        add_credential, delete_credential, delete_request_logs, force_refresh_token,
+        get_all_credentials, get_cached_balances, get_cooldowns, get_credential_balance,
+        get_global_config, get_proxy_config, get_request_logs, get_stats, import_token_json,
+        reset_failure_count, set_credential_disabled, set_credential_endpoint,
+        set_credential_priority, set_credential_region, update_credential, update_global_config,
+        update_proxy_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -46,6 +47,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/priority", post(set_credential_priority))
         .route("/credentials/{id}/region", post(set_credential_region))
         .route("/credentials/{id}/endpoint", post(set_credential_endpoint))
+        .route("/credentials/{id}/update", post(update_credential))
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
         .route("/credentials/{id}/balance", get(get_credential_balance))
@@ -56,7 +58,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         .route("/stats", get(get_stats))
         .route("/cooldowns", get(get_cooldowns))
-        .route("/request-logs", get(get_request_logs))
+        .route(
+            "/request-logs",
+            get(get_request_logs).delete(delete_request_logs),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
