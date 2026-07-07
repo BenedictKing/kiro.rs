@@ -2,6 +2,7 @@
 
 use axum::{
     Router, middleware,
+    extract::DefaultBodyLimit,
     routing::{delete, get, post},
 };
 
@@ -16,6 +17,10 @@ use super::{
     },
     middleware::{AdminState, admin_auth_middleware},
 };
+
+/// Admin API 请求体最大大小限制 (10MB)
+/// 批量导入凭据时可能需要上传较大的 JSON 文件
+const MAX_ADMIN_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// 创建 Admin API 路由
 ///
@@ -62,6 +67,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
             "/request-logs",
             get(get_request_logs).delete(delete_request_logs),
         )
+        .layer(DefaultBodyLimit::max(MAX_ADMIN_BODY_SIZE))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
